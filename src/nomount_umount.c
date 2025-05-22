@@ -30,7 +30,6 @@
 #include "nomount.h"
 #include "nomount_umount.h"
 
-extern int path_umount(struct path *path, int flags);
 struct cred *nmfs_cred;
 /* Feature control */
 bool nomount_kernel_umount_enabled = true;
