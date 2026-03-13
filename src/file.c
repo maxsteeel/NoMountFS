@@ -1,10 +1,11 @@
 /*
- * NoMountFS: File operations 
+ * NoMountFS: File operations
  * Handling read, write and open.
  */
 
 #include "nomount.h"
 #include "compat.h"
+#include <linux/uio.h>
 
 /* * nomount_open: called when a file is being opened.
  * We must open the lower file and store its reference.
@@ -63,7 +64,7 @@ static long nomount_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned
     struct file *lower_file = nomount_lower_file(file);
     long err = -ENOTTY;
 
-    if (lower_file->f_op->unlocked_ioctl)
+    if (lower_file->f_op && lower_file->f_op->unlocked_ioctl)
         err = lower_file->f_op->unlocked_ioctl(lower_file, cmd, arg);
 
     /* If ioctl changed size/attributes, sync them back */ 

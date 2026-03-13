@@ -20,8 +20,13 @@ static int nomount_create(struct inode *dir, struct dentry *dentry, umode_t mode
 	err = vfs_create(d_inode(lower_parent_dentry), lower_dentry, mode, want_excl);
 	if (err) goto out;
 
-	err = PTR_ERR(__nomount_interpose(dentry, dir->i_sb, &lower_path));
-	if (err) goto out;
+	/* Interpose the new dentry - check for errors properly */
+	lower_dentry = __nomount_interpose(dentry, dir->i_sb, &lower_path);
+	if (IS_ERR(lower_dentry)) {
+		err = PTR_ERR(lower_dentry);
+		goto out;
+	}
+	err = 0;
 
 	fsstack_copy_attr_times(dir, nomount_lower_inode(dir));
 	fsstack_copy_inode_size(dir, d_inode(lower_parent_dentry));
@@ -73,8 +78,13 @@ static int nomount_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	err = vfs_mkdir(d_inode(lower_parent_dentry), lower_dentry, mode);
 	if (err) goto out;
 
-	err = PTR_ERR(__nomount_interpose(dentry, dir->i_sb, &lower_path));
-	if (err) goto out;
+	/* Interpose the new dentry - check for errors properly */
+	lower_dentry = __nomount_interpose(dentry, dir->i_sb, &lower_path);
+	if (IS_ERR(lower_dentry)) {
+		err = PTR_ERR(lower_dentry);
+		goto out;
+	}
+	err = 0;
 
 	fsstack_copy_attr_times(dir, nomount_lower_inode(dir));
 	fsstack_copy_inode_size(dir, d_inode(lower_parent_dentry));
@@ -127,8 +137,13 @@ static int nomount_symlink(struct inode *dir, struct dentry *dentry, const char 
 	err = vfs_symlink(d_inode(lower_parent_dentry), lower_dentry, symname);
 	if (err) goto out;
 
-	err = PTR_ERR(__nomount_interpose(dentry, dir->i_sb, &lower_path));
-	if (err) goto out;
+	/* Interpose the new dentry - check for errors properly */
+	lower_dentry = __nomount_interpose(dentry, dir->i_sb, &lower_path);
+	if (IS_ERR(lower_dentry)) {
+		err = PTR_ERR(lower_dentry);
+		goto out;
+	}
+	err = 0;
 
 	fsstack_copy_attr_times(dir, nomount_lower_inode(dir));
 	fsstack_copy_inode_size(dir, d_inode(lower_parent_dentry));

@@ -56,7 +56,6 @@ static void nomount_destroy_inode(struct inode *inode)
 void nomount_put_super(struct super_block *sb)
 {
 	struct nomount_sb_info *sbi = NOMOUNT_SB(sb);
-	struct super_block *lower_sb;
 
 	if (!sbi)
 		return;
@@ -99,15 +98,22 @@ int nomount_statfs(struct dentry *dentry, struct kstatfs *buf)
 static int nomount_show_options(struct seq_file *m, struct dentry *root)
 {
 	struct nomount_dentry_info *info;
+	struct nomount_sb_info *sbi;
 
-	/* Safety check */
 	if (!root) return 0;
 
 	info = NOMOUNT_D(root);
+	sbi = NOMOUNT_SB(root->d_sb);
 
-	/* Read the path from the dentry safely to avoid NULL pointer panics */
-	if (info && info->lower_path.dentry) {
+	if (info && info->lower_path.dentry)
 		seq_show_option(m, "lowerdir", info->lower_path.dentry->d_name.name);
+
+	/* Also emit injection parameters so /proc/mounts is complete */
+	if (sbi && sbi->has_inject) {
+		seq_show_option(m, "inject_name", sbi->inject_name);
+		if (sbi->inject_path.dentry)
+			seq_show_option(m, "inject_path",
+					sbi->inject_path.dentry->d_name.name);
 	}
 
 	return 0;
@@ -138,6 +144,8 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	char *path_to_mount = NULL;
 	char *inject_name_str = NULL;
 	char *inject_path_str = NULL;
+	char *target_str = NULL;
+	char *source_str = NULL;
 	char *p;
 	int err = 0;
 
@@ -151,11 +159,20 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 				inject_name_str = p + 12;
 			} else if (!strncmp(p, "inject_path=", 12)) {
 				inject_path_str = p + 12;
+			} else if (!strncmp(p, "target=", 7)) {
+				target_str = p + 7;
+			} else if (!strncmp(p, "source=", 7)) {
+				source_str = p + 7;
 			}
 		}
 	}
 
-	/* 3. Fallback: If there is no 'lowerdir', use the original dev_name */
+	/* 3. For direct file injection, use source= and target= options */
+	if (source_str && target_str) {
+		path_to_mount = source_str;
+	}
+
+	/* 4. Fallback: If there is no 'lowerdir' or 'source', use the original dev_name */
 	if (!path_to_mount && dev_name && *dev_name) {
 		/* Ignore generic words that are often used as filler */
 		if (strcmp(dev_name, "none") != 0 && strcmp(dev_name, "nomountfs") != 0) {
@@ -163,7 +180,7 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		}
 	}
 
-	/* 4. Abort cleanly if there is nothing to mount */
+	/* 5. Abort cleanly if there is nothing to mount */
 	if (!path_to_mount || !*path_to_mount) {
 		pr_err("NoMountFS: Missing source path.\n");
 		return -EINVAL;
@@ -176,20 +193,63 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	if (!sbi) return -ENOMEM;
 	sb->s_fs_info = sbi;
 
-	err = kern_path(path_to_mount, LOOKUP_FOLLOW, &lower_path);
-	if (err) {
-		pr_err("NoMountFS: Could not find path: %s\n", path_to_mount);
-		goto out_free_sbi;
-	}
+	/* 5. Handle direct file injection with target= option
+	 * Syntax: mount -t nomountfs none <mount_dir> -o source=<src>,target=<file_to_shadow>
+	 * The lower_path must be the PARENT DIRECTORY of the target file, not the
+	 * target file itself — the filesystem root must always be a directory inode.
+	 */
+	if (target_str && *target_str) {
+		struct path target_path;
+		struct dentry *parent_dentry;
 
-	if (inject_name_str && inject_path_str) {
-		err = kern_path(inject_path_str, LOOKUP_FOLLOW, &sbi->inject_path);
+		/* Resolve the target file path */
+		err = kern_path(target_str, LOOKUP_FOLLOW, &target_path);
 		if (err) {
-			pr_err("NoMountFS: Error accessing injected file '%s'\n", inject_path_str);
-			goto out_put_path;
+			pr_err("NoMountFS: Could not find target file: %s\n", target_str);
+			goto out_free_sbi;
 		}
-		strlcpy(sbi->inject_name, inject_name_str, sizeof(sbi->inject_name));
+
+		/* Set up injection: source file (path_to_mount) shadows the target */
+		err = kern_path(path_to_mount, LOOKUP_FOLLOW, &sbi->inject_path);
+		if (err) {
+			pr_err("NoMountFS: Could not find source file: %s\n", path_to_mount);
+			path_put(&target_path);
+			goto out_free_sbi;
+		}
+
+		/* Store the target filename for lookup interception */
+		strlcpy(sbi->inject_name, target_path.dentry->d_name.name,
+			sizeof(sbi->inject_name));
 		sbi->has_inject = true;
+
+		/*
+		 * Bug fix: use the PARENT directory as the lower_path root, not
+		 * the target file itself. d_make_root requires a directory inode.
+		 */
+		parent_dentry = dget_parent(target_path.dentry);
+		lower_path.dentry = parent_dentry;
+		lower_path.mnt = mntget(target_path.mnt);
+
+		/* Release the original file-level reference; we hold parent now */
+		path_put(&target_path);
+	} else {
+		/* Normal mount: use path_to_mount as the lower directory */
+		err = kern_path(path_to_mount, LOOKUP_FOLLOW, &lower_path);
+		if (err) {
+			pr_err("NoMountFS: Could not find path: %s\n", path_to_mount);
+			goto out_free_sbi;
+		}
+
+		/* Handle Magic Mount injection options */
+		if (inject_name_str && inject_path_str) {
+			err = kern_path(inject_path_str, LOOKUP_FOLLOW, &sbi->inject_path);
+			if (err) {
+				pr_err("NoMountFS: Error accessing injected file '%s'\n", inject_path_str);
+				goto out_put_path;
+			}
+			strlcpy(sbi->inject_name, inject_name_str, sizeof(sbi->inject_name));
+			sbi->has_inject = true;
+		}
 	}
 
 	sbi->lower_sb = lower_path.dentry->d_sb;
@@ -206,7 +266,15 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
     }
 
 	sb->s_maxbytes = sbi->lower_sb->s_maxbytes;
-    sb->s_stack_depth = sbi->lower_sb->s_stack_depth + 1;
+	sb->s_stack_depth = sbi->lower_sb->s_stack_depth + 1;
+
+	/* Check stack depth to prevent excessive stacking */
+	if (sb->s_stack_depth > FILESYSTEM_MAX_STACK_DEPTH) {
+		pr_err("NoMountFS: Stack depth exceeded (%d > %d)\n",
+		       sb->s_stack_depth, FILESYSTEM_MAX_STACK_DEPTH);
+		err = -EINVAL;
+		goto out_put_inject;
+	}
 
 	/* Create the virtual root dentry */
 	root = d_make_root(nomount_iget(sb, d_inode(lower_path.dentry)));
@@ -226,7 +294,8 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	nomount_set_lower_path(root, &lower_path);
 	sb->s_root = root;
 	d_set_d_op(sb->s_root, &nomount_dops);
-	d_rehash(sb->s_root);
+
+	/* d_make_root already hashes the dentry, no need to rehash */
 
 	return 0;
 
