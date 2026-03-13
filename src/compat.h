@@ -10,7 +10,10 @@
 #include <linux/fs.h>
 #include <linux/sched.h>
 #include <linux/path.h>
+/* iversion.h was introduced in kernel 4.16; use raw i_version on older kernels */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
 #include <linux/iversion.h>
+#endif
 
 /* * Inode locking: i_mutex (old) vs i_rwsem (new).
  * Kernel 4.5 renamed i_mutex and introduced inode_lock() helper.

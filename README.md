@@ -25,18 +25,18 @@ This method allows you to mount a modified file directly over an existing system
 **Syntax:**
 
 ```bash
-mount -t nomountfs <source_file> <target_file>
+mount -t nomountfs none <parent_dir> -o source=<source_file>,target=<target_file_to_shadow>
 
 ```
 
 **Example:**
 
 ```bash
-mount -t nomountfs /data/local/tmp/hosts /system/etc/hosts
+mount -t nomountfs none /system/etc -o source=/data/local/tmp/hosts,target=/system/etc/hosts
 
 ```
 
-*Note: The target file must exist prior to mounting. NoMountFS will completely shadow the original file until unmounted.*
+*Note: Use `none` as the source device. The `source=` option specifies the replacement file, and `target=` specifies which file to shadow. NoMountFS will transparently substitute the target file with the source file until unmounted.*
 
 ### 2. Magic Mount (Directory Injection)
 

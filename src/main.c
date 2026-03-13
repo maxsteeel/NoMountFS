@@ -47,14 +47,21 @@ static int __init init_nomount_fs(void)
 	if (err)
 		goto out;
 
+	/* Initialize the memory cache for our dentries */
+	err = nomount_init_dentry_cache();
+	if (err)
+		goto out_free_inode_cache;
+
 	/* Register the filesystem in the VFS layer */
 	err = register_filesystem(&nomount_fs_type);
 	if (err)
-		goto out_free_inode_cache;
+		goto out_free_dentry_cache;
 
 	pr_info("NoMountFS: Successfully registered.\n");
 	return 0;
 
+out_free_dentry_cache:
+	nomount_destroy_dentry_cache();
 out_free_inode_cache:
 	nomount_destroy_inode_cache();
 out:
@@ -64,8 +71,9 @@ out:
 static void __exit exit_nomount_fs(void)
 {
 	pr_info("NoMountFS: Unregistering filesystem...\n");
-	nomount_destroy_inode_cache();
 	unregister_filesystem(&nomount_fs_type);
+	nomount_destroy_dentry_cache();
+	nomount_destroy_inode_cache();
 }
 
 MODULE_AUTHOR("Erez Zadok (WrapFS), maxsteeel (NoMountFS)");

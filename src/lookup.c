@@ -102,9 +102,9 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 {
 	struct dentry *ret, *parent, *lower_dentry;
 	struct path lower_parent_path, lower_path;
-    struct nomount_sb_info *sbi;
+	struct nomount_sb_info *sbi;
 	struct qstr name;
-    int err;
+	int err;
 
 	parent = dget_parent(dentry);
 	nomount_get_lower_path(parent, &lower_parent_path);
@@ -117,9 +117,10 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 	}
 
 	name = dentry->d_name;
-    sbi = kzalloc(sizeof(struct nomount_sb_info), GFP_KERNEL);
+	/* Get the superblock info from the dentry's superblock, not allocate new */
+	sbi = NOMOUNT_SB(dentry->d_sb);
 
-	if (sbi->has_inject && strcmp(name.name, sbi->inject_name) == 0) {
+	if (sbi && sbi->has_inject && strcmp(name.name, sbi->inject_name) == 0) {
 		pathcpy(&lower_path, &sbi->inject_path);
 		path_get(&lower_path);
 		lower_dentry = lower_path.dentry;
@@ -142,6 +143,11 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 	} else {
 		/* Positive dentry: Interpose virtual dentry with real inode */
 		ret = __nomount_interpose(dentry, dentry->d_sb, &lower_path);
+		if (IS_ERR(ret)) {
+			/* Interpose failed: release private data to avoid a leak */
+			free_dentry_private_data(dentry);
+			goto out_put_parent;
+		}
 	}
 
 	/* Final metadata sync for the parent and current dentry */
@@ -160,7 +166,7 @@ out_free_dentry:
 
 out_put_parent:
 	nomount_put_lower_path(parent, &lower_parent_path);
-	dget(parent);
+	dput(parent);
 	return ret;
 }
 
