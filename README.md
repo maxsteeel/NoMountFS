@@ -16,7 +16,7 @@ Unlike `overlayfs` or standard bind mounts, NoMountFS operates entirely within t
 
 ## Usage Guide
 
-NoMountFS supports two primary methods of operation, depending on the complexity of the redirection required.
+NoMountFS supports three primary methods of operation, depending on the complexity of the redirection required.
 
 ### 1. Direct File Injection (1-to-1)
 
@@ -57,6 +57,28 @@ mount -t nomountfs none /system/app/YouTube -o lowerdir=/system/app/YouTube,inje
 ```
 
 In this scenario, if a user or system process lists the directory (`ls /system/app/YouTube`), it appears normal. However, if a process attempts to `open()` or `mmap()` the file `base.apk`, NoMountFS will transparently serve the file located at `/data/local/tmp/modded_youtube.apk`.
+
+### 3. Union/Overlay Mount (Directory Merging)
+
+This method acts similarly to `overlayfs` and `unionfs`. It allows you to merge multiple lower directories (separated by colons) and an optional upper directory, presenting their unified contents at the mount point.
+
+**Syntax:**
+
+```bash
+mount -t nomountfs none <mount_point> -o [upperdir=<upper_path>,]lowerdir=<lower_path1>:<lower_path2>...
+```
+
+**Example:**
+
+```bash
+mount -t nomountfs none /mnt/merged -o upperdir=/data/upper,lowerdir=/data/lower1:/data/lower2
+```
+
+In this scenario:
+* A file created or modified in `/mnt/merged` will actually be modified in the `upperdir` (`/data/upper`).
+* If a user lists (`ls /mnt/merged`), they will see a deduplicated list of files present in `/data/upper`, `/data/lower1`, and `/data/lower2`.
+* If a file exists in multiple layers with the same name, the file from the highest layer (e.g. `upperdir`, or the first `lowerdir` in the list) shadows the ones below it.
+* A maximum of 5 branches are supported at once.
 
 ### Unmounting
 

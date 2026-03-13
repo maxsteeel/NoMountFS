@@ -101,13 +101,18 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 			     unsigned int flags)
 {
 	struct dentry *ret, *parent, *lower_dentry;
-	struct path lower_parent_path, lower_path;
+	struct path lower_parent_paths[NOMOUNT_MAX_BRANCHES];
+	struct path found_paths[NOMOUNT_MAX_BRANCHES];
+	int num_lower_parent_paths;
+	int num_found_paths = 0;
 	struct nomount_sb_info *sbi;
 	struct qstr name;
 	int err;
+	int i;
+	bool is_dir = false;
 
 	parent = dget_parent(dentry);
-	nomount_get_lower_path(parent, &lower_parent_path);
+	num_lower_parent_paths = nomount_get_all_lower_paths(parent, lower_parent_paths);
 
 	/* Allocate private data for the dentry info */
 	err = new_dentry_private_data(dentry);
@@ -121,32 +126,72 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 	sbi = NOMOUNT_SB(dentry->d_sb);
 
 	if (sbi && sbi->has_inject && strcmp(name.name, sbi->inject_name) == 0) {
-		pathcpy(&lower_path, &sbi->inject_path);
-		path_get(&lower_path);
-		lower_dentry = lower_path.dentry;
+		pathcpy(&found_paths[0], &sbi->inject_path);
+		path_get(&found_paths[0]);
+		lower_dentry = found_paths[0].dentry;
+		num_found_paths = 1;
 	} else {
-		lower_dentry = lookup_one_len(name.name, lower_parent_path.dentry, name.len);
-		if (IS_ERR(lower_dentry)) {
-			ret = ERR_CAST(lower_dentry);
-			goto out_free_dentry;
+		struct path first_negative_path = { .dentry = NULL, .mnt = NULL };
+
+		for (i = 0; i < num_lower_parent_paths; i++) {
+			inode_lock_nested(d_inode(lower_parent_paths[i].dentry), I_MUTEX_PARENT);
+			lower_dentry = lookup_one_len(name.name, lower_parent_paths[i].dentry, name.len);
+			inode_unlock(d_inode(lower_parent_paths[i].dentry));
+			
+			if (IS_ERR(lower_dentry)) {
+				continue;
+			}
+			
+			if (d_really_is_positive(lower_dentry)) {
+				found_paths[num_found_paths].dentry = lower_dentry;
+				found_paths[num_found_paths].mnt = mntget(lower_parent_paths[i].mnt);
+				num_found_paths++;
+
+				if (!S_ISDIR(d_inode(lower_dentry)->i_mode)) {
+					is_dir = false;
+					break; /* Shadowing: top file hides lower files/dirs */
+				} else {
+					is_dir = true;
+				}
+			} else {
+				/* It's negative. Save the first one (from layer 0) for creations */
+				if (!first_negative_path.dentry) {
+					first_negative_path.dentry = lower_dentry;
+					first_negative_path.mnt = mntget(lower_parent_paths[i].mnt);
+				} else {
+					dput(lower_dentry);
+				}
+			}
 		}
-		lower_path.dentry = lower_dentry;
-		lower_path.mnt = mntget(lower_parent_path.mnt);
+
+		/* If we found nothing positive, but we found a negative dentry, use it */
+		if (num_found_paths == 0 && first_negative_path.dentry) {
+			found_paths[0] = first_negative_path;
+			num_found_paths = 1;
+		} else if (first_negative_path.dentry) {
+			/* Found positive later, release the cached negative dentry */
+			path_put(&first_negative_path);
+		}
 	}
 
-	nomount_set_lower_path(dentry, &lower_path);
-
-	if (d_really_is_negative(lower_dentry)) {
-		/* Negative dentry: file doesn't exist. Map to NULL */
+	if (num_found_paths == 0) {
+		/* Negative dentry: file doesn't exist AND no negative dentry available (rare error). */
+		nomount_set_lower_paths(dentry, found_paths, 0); 
+		d_add(dentry, NULL);
+		ret = NULL;
+	} else if (d_really_is_negative(found_paths[0].dentry)) {
+		/* Proper negative dentry cached, ready for creation */
+		nomount_set_lower_paths(dentry, found_paths, 1);
 		d_add(dentry, NULL);
 		ret = NULL;
 	} else {
-		/* Positive dentry: Interpose virtual dentry with real inode */
-		ret = __nomount_interpose(dentry, dentry->d_sb, &lower_path);
+		nomount_set_lower_paths(dentry, found_paths, num_found_paths);
+		/* Positive dentry: Interpose virtual dentry with real inode (from topmost branch) */
+		ret = __nomount_interpose(dentry, dentry->d_sb, &found_paths[0]);
 		if (IS_ERR(ret)) {
 			/* Interpose failed: release private data to avoid a leak */
 			free_dentry_private_data(dentry);
-			goto out_put_parent;
+			goto out_put_found_paths; /* Jump to put ALL found paths */
 		}
 	}
 
@@ -159,13 +204,17 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 
 	fsstack_copy_attr_atime(d_inode(parent), nomount_lower_inode(d_inode(parent)));
 
-out_free_dentry:
-	/* If the lookup fail, release the private_data */
-	if (IS_ERR(lower_dentry))
-		free_dentry_private_data(dentry);
+out_put_found_paths:
+	/* Only put found paths if we jumped here on interpose error, 
+       otherwise they are tracked inside dentry->d_fsdata */
+	if (IS_ERR(ret)) {
+		for (i = 0; i < num_found_paths; i++) {
+			path_put(&found_paths[i]);
+		}
+	}
 
 out_put_parent:
-	nomount_put_lower_path(parent, &lower_parent_path);
+	nomount_put_all_lower_paths(parent, lower_parent_paths, num_lower_parent_paths);
 	dput(parent);
 	return ret;
 }

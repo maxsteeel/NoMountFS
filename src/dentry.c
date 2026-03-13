@@ -70,28 +70,32 @@ static struct dentry *nomount_d_real(struct dentry *dentry,
  */
 static int nomount_d_delete(const struct dentry *dentry)
 {
-	struct path lower_path;
+	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
+	int num_lower_paths;
 	struct dentry *lower_dentry;
 	int err = 0;
 
 	if (!dentry->d_fsdata)
 		return 1;
 
-	nomount_get_lower_path(dentry, &lower_path);
-	lower_dentry = lower_path.dentry;
+	num_lower_paths = nomount_get_all_lower_paths(dentry, lower_paths);
+	
+	if (num_lower_paths > 0) {
+		lower_dentry = lower_paths[0].dentry; /* Topmost logic */
 
-	if (lower_dentry) {
-		/* If the original dentry is no longer cached (was deleted/moved),
-		 * we must also disappear from the cache.
-		 */
-		if (d_unhashed(lower_dentry))
-			err = 1;
+		if (lower_dentry) {
+			/* If the original dentry is no longer cached (was deleted/moved),
+			 * we must also disappear from the cache.
+			 */
+			if (d_unhashed(lower_dentry))
+				err = 1;
 
-		else if (lower_dentry->d_op && lower_dentry->d_op->d_delete)
-			err = lower_dentry->d_op->d_delete(lower_dentry);
+			else if (lower_dentry->d_op && lower_dentry->d_op->d_delete)
+				err = lower_dentry->d_op->d_delete(lower_dentry);
+		}
 	}
 
-	nomount_put_lower_path(dentry, &lower_path);
+	nomount_put_all_lower_paths(dentry, lower_paths, num_lower_paths);
 	return err;
 }
 
@@ -120,13 +124,15 @@ int new_dentry_private_data(struct dentry *dentry)
 void free_dentry_private_data(struct dentry *dentry)
 {
     struct nomount_dentry_info *info = NOMOUNT_D(dentry);
+	int i;
 
     if (info) {
-        /* Only put the path if it's actually there */
-        if (info->lower_path.dentry) {
-            path_put(&info->lower_path);
-            info->lower_path.dentry = NULL; 
-        }
+		for (i = 0; i < info->num_lower_paths; i++) {
+			if (info->lower_paths[i].dentry) {
+				path_put(&info->lower_paths[i]);
+				info->lower_paths[i].dentry = NULL; 
+			}
+		}
         kfree(info);
         dentry->d_fsdata = NULL;
     }

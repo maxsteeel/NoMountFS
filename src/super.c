@@ -71,12 +71,17 @@ void nomount_put_super(struct super_block *sb)
 int nomount_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
 	struct kstatfs lower_buf;
-	struct path lower_path;
+	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
+	int num_paths;
 	int err;
 
-	nomount_get_lower_path(dentry, &lower_path);
-	err = vfs_statfs(&lower_path, &lower_buf);
-	nomount_put_lower_path(dentry, &lower_path);
+	num_paths = nomount_get_all_lower_paths(dentry, lower_paths);
+	if (num_paths == 0) return -ENOENT;
+
+	/* Get the statfs of the lowest layer to show the physical system disk's free space */
+	err = vfs_statfs(&lower_paths[num_paths - 1], &lower_buf);
+	
+	nomount_put_all_lower_paths(dentry, lower_paths, num_paths);
 	if (err) return err;
 
 	*buf = lower_buf;
@@ -97,19 +102,30 @@ int nomount_statfs(struct dentry *dentry, struct kstatfs *buf)
  */
 static int nomount_show_options(struct seq_file *m, struct dentry *root)
 {
-	struct nomount_dentry_info *info;
 	struct nomount_sb_info *sbi;
+	int i;
 
 	if (!root) return 0;
-
-	info = NOMOUNT_D(root);
 	sbi = NOMOUNT_SB(root->d_sb);
+	if (!sbi) return 0;
 
-	if (info && info->lower_path.dentry)
-		seq_show_option(m, "lowerdir", info->lower_path.dentry->d_name.name);
+	if (sbi->num_lower_paths > 0) {
+		/* Topmost layer could represent upperdir or first lowerdir */
+		seq_show_option(m, "upperdir", sbi->lower_paths[0].dentry->d_name.name);
+		
+		if (sbi->num_lower_paths > 1) {
+			seq_puts(m, ",lowerdir=");
+			for (i = 1; i < sbi->num_lower_paths; i++) {
+				if (i > 1) seq_puts(m, ":");
+				/* Ideally we would construct full absolute paths here using d_path,
+				   but a simple name matches the typical minimal fallback format */
+				seq_escape(m, sbi->lower_paths[i].dentry->d_name.name, ", \t\n\\");
+			}
+		}
+	}
 
 	/* Also emit injection parameters so /proc/mounts is complete */
-	if (sbi && sbi->has_inject) {
+	if (sbi->has_inject) {
 		seq_show_option(m, "inject_name", sbi->inject_name);
 		if (sbi->inject_path.dentry)
 			seq_show_option(m, "inject_path",
@@ -133,7 +149,7 @@ const struct super_operations nomount_sops = {
 int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 {
 	struct dentry *root;
-	struct path lower_path;
+	struct inode *root_inode;
 	struct nomount_sb_info *sbi;
 	
 	/* 1. Unpack the assembly mount_data */
@@ -142,12 +158,16 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	char *opts = mdata ? (char *)mdata->raw_data : NULL;
 	
 	char *path_to_mount = NULL;
+	char *upperdir_str = NULL;
 	char *inject_name_str = NULL;
 	char *inject_path_str = NULL;
 	char *target_str = NULL;
 	char *source_str = NULL;
 	char *p;
+	char *branch_ptr;
+	char *branch_str;
 	int err = 0;
+	int i;
 
 	/* 2. Try to extract the path from the options (e.g. -o lowerdir=/path/example) */
 	if (opts) {
@@ -155,6 +175,8 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 			if (!*p) continue;
 			if (!strncmp(p, "lowerdir=", 9)) {
 				path_to_mount = p + 9; /* The word "lowerdir=" is skipped */
+			} else if (!strncmp(p, "upperdir=", 9)) {
+				upperdir_str = p + 9; 
 			} else if (!strncmp(p, "inject_name=", 12)) {
 				inject_name_str = p + 12;
 			} else if (!strncmp(p, "inject_path=", 12)) {
@@ -227,16 +249,47 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		 * the target file itself. d_make_root requires a directory inode.
 		 */
 		parent_dentry = dget_parent(target_path.dentry);
-		lower_path.dentry = parent_dentry;
-		lower_path.mnt = mntget(target_path.mnt);
+		sbi->lower_paths[0].dentry = parent_dentry;
+		sbi->lower_paths[0].mnt = mntget(target_path.mnt);
+		sbi->num_lower_paths = 1;
 
 		/* Release the original file-level reference; we hold parent now */
 		path_put(&target_path);
 	} else {
-		/* Normal mount: use path_to_mount as the lower directory */
-		err = kern_path(path_to_mount, LOOKUP_FOLLOW, &lower_path);
-		if (err) {
-			pr_err("NoMountFS: Could not find path: %s\n", path_to_mount);
+		sbi->num_lower_paths = 0;
+
+		/* Process upperdir (layer 0) if provided, mimicking OverlayFS */
+		if (upperdir_str && *upperdir_str) {
+			err = kern_path(upperdir_str, LOOKUP_FOLLOW, &sbi->lower_paths[sbi->num_lower_paths]);
+			if (err) {
+				pr_err("NoMountFS: Could not find upperdir path: %s\n", upperdir_str);
+				goto out_put_path;
+			}
+			sbi->num_lower_paths++;
+		}
+
+		/* Process lowerdir(s), splitting by : for union branches */
+		if (path_to_mount && *path_to_mount) {
+			branch_ptr = path_to_mount;
+			while ((branch_str = strsep(&branch_ptr, ":")) != NULL) {
+				if (!*branch_str) continue;
+				if (sbi->num_lower_paths >= NOMOUNT_MAX_BRANCHES) {
+					pr_err("NoMountFS: Maximum stack depth reached (%d)\n", NOMOUNT_MAX_BRANCHES);
+					err = -EINVAL;
+					goto out_put_path;
+				}
+				err = kern_path(branch_str, LOOKUP_FOLLOW, &sbi->lower_paths[sbi->num_lower_paths]);
+				if (err) {
+					pr_err("NoMountFS: Could not find lowerdir path: %s\n", branch_str);
+					goto out_put_path;
+				}
+				sbi->num_lower_paths++;
+			}
+		}
+		
+		if (sbi->num_lower_paths == 0) {
+			pr_err("NoMountFS: Missing valid upperdir or lowerdir options.\n");
+			err = -EINVAL;
 			goto out_free_sbi;
 		}
 
@@ -252,7 +305,7 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		}
 	}
 
-	sbi->lower_sb = lower_path.dentry->d_sb;
+	sbi->lower_sb = sbi->lower_paths[0].dentry->d_sb;
 	sb->s_op = &nomount_sops;
 	sb->s_d_op = &nomount_dops;
 	sb->s_export_op = &nomount_export_ops;
@@ -266,18 +319,32 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
     }
 
 	sb->s_maxbytes = sbi->lower_sb->s_maxbytes;
-	sb->s_stack_depth = sbi->lower_sb->s_stack_depth + 1;
+	
+	/* Calculate maximum stack depth among all branches */
+	sb->s_stack_depth = 0;
+	for (i = 0; i < sbi->num_lower_paths; i++) {
+		if (sbi->lower_paths[i].dentry->d_sb->s_stack_depth > sb->s_stack_depth) {
+			sb->s_stack_depth = sbi->lower_paths[i].dentry->d_sb->s_stack_depth;
+		}
+	}
+	sb->s_stack_depth++; /* Our layer counts as +1 */
 
 	/* Check stack depth to prevent excessive stacking */
 	if (sb->s_stack_depth > FILESYSTEM_MAX_STACK_DEPTH) {
-		pr_err("NoMountFS: Stack depth exceeded (%d > %d)\n",
+		pr_err("NoMountFS: Maximum overall stack depth exceeded (%d > %d)\n",
 		       sb->s_stack_depth, FILESYSTEM_MAX_STACK_DEPTH);
 		err = -EINVAL;
 		goto out_put_inject;
 	}
 
+	root_inode = nomount_iget(sb, d_inode(sbi->lower_paths[0].dentry));
+	if (IS_ERR(root_inode)) {
+		err = PTR_ERR(root_inode);
+		goto out_put_inject;
+	}
+
 	/* Create the virtual root dentry */
-	root = d_make_root(nomount_iget(sb, d_inode(lower_path.dentry)));
+	root = d_make_root(root_inode);
 	if (!root) {
 		pr_err("NoMountFS: Failed to create root dentry\n");
 		err = -ENOMEM;
@@ -288,10 +355,10 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	err = new_dentry_private_data(root);
 	if (err) {
 		dput(root);
-		goto out_put_inject;
+		goto out_put_inject; /* d_make_root handles inode on failure if dput handles failure*/
 	}
 
-	nomount_set_lower_path(root, &lower_path);
+	nomount_set_lower_paths(root, sbi->lower_paths, sbi->num_lower_paths);
 	sb->s_root = root;
 	d_set_d_op(sb->s_root, &nomount_dops);
 
@@ -302,7 +369,10 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 out_put_inject:
 	if (sbi->has_inject) path_put(&sbi->inject_path);
 out_put_path:
-	path_put(&lower_path);
+	for (i = 0; i < sbi->num_lower_paths; i++) {
+		if (sbi->lower_paths[i].dentry)
+			path_put(&sbi->lower_paths[i]);
+	}
 out_free_sbi:
 	kfree(sbi);
 	sb->s_fs_info = NULL;

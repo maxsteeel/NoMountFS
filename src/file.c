@@ -14,8 +14,10 @@ static int nomount_open(struct inode *inode, struct file *file)
 {
 	int err = 0;
 	struct file *lower_file = NULL;
-	struct path lower_path;
+	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
+	int num_lower_paths;
 	struct nomount_file_info *info;
+	int i;
 
 	/* Allocate private storage for lower file reference */
 	info = kzalloc(sizeof(struct nomount_file_info), GFP_KERNEL);
@@ -23,16 +25,37 @@ static int nomount_open(struct inode *inode, struct file *file)
 		return -ENOMEM;
  
 	info->ghost_emitted = false;
+	hash_init(info->dirent_hashtable);
+	INIT_LIST_HEAD(&info->dirents_list);
+	mutex_init(&info->readdir_mutex);
+	info->num_lower_files = 0;
 
-	nomount_get_lower_path(file->f_path.dentry, &lower_path);
-	lower_file = dentry_open(&lower_path, file->f_flags, current_cred());
-	path_put(&lower_path);
+	num_lower_paths = nomount_get_all_lower_paths(file->f_path.dentry, lower_paths);
+	
+	for (i = 0; i < num_lower_paths; i++) {
+		lower_file = dentry_open(&lower_paths[i], file->f_flags, current_cred());
+		if (IS_ERR(lower_file)) {
+			err = PTR_ERR(lower_file);
+			break; /* If one fails, stop and cleanup */
+		}
+		info->lower_files[info->num_lower_files++] = lower_file;
+		
+		/* If it's not a directory, we only open the topmost one */
+		if (!S_ISDIR(inode->i_mode))
+			break;
+	}
 
-	if (IS_ERR(lower_file)) {
-		err = PTR_ERR(lower_file);
+	nomount_put_all_lower_paths(file->f_path.dentry, lower_paths, num_lower_paths);
+
+	if (err && info->num_lower_files == 0) {
+		kfree(info);
+	} else if (err) {
+		/* Failed to open all directories, close what we opened */
+		for (i = 0; i < info->num_lower_files; i++) {
+			fput(info->lower_files[i]);
+		}
 		kfree(info);
 	} else {
-		info->lower_file = lower_file;
 		file->private_data = info;
 		fsstack_copy_attr_all(inode, nomount_lower_inode(inode));
 	}
@@ -45,12 +68,24 @@ static int nomount_open(struct inode *inode, struct file *file)
 static int nomount_release(struct inode *inode, struct file *file)
 {
 	struct nomount_file_info *info = NOMOUNT_F(file);
+	struct nomount_dirent *nd, *tmp;
+	int i;
 
 	if (info) {
-		if (info->lower_file) {
-			fput(info->lower_file);
-			info->lower_file = NULL;
+		for (i = 0; i < info->num_lower_files; i++) {
+			if (info->lower_files[i]) {
+				fput(info->lower_files[i]);
+			}
 		}
+		
+		/* Clean up cached directory entries */
+		list_for_each_entry_safe(nd, tmp, &info->dirents_list, list) {
+			hash_del(&nd->hash);
+			list_del(&nd->list);
+			kfree(nd->name);
+			kfree(nd);
+		}
+		
 		kfree(info);
 		file->private_data = NULL;
 	}
@@ -220,16 +255,29 @@ struct nomount_readdir_data {
     struct dir_context *orig_ctx;
     struct nomount_sb_info *sbi;
     struct nomount_file_info *nfi;
+	int branch_idx;
 };
 
-/* * nomount_filldir: Intercepts entries from the lower filesystem.
+/* * nomount_filldir_cache: Fills the in-memory cache of directories.
  */
-static int nomount_filldir(struct dir_context *ctx, const char *name, int namelen,
+static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int namelen,
                            loff_t offset, u64 ino, unsigned int d_type)
 {
     struct nomount_readdir_data *buf = container_of(ctx, struct nomount_readdir_data, ctx);
     struct nomount_sb_info *sbi = buf->sbi;
     struct nomount_file_info *nfi = buf->nfi;
+	struct nomount_dirent *nd;
+	u32 hash_val;
+
+	/* Calculate hash for fast lookup */
+	hash_val = full_name_hash(NULL, name, namelen);
+
+	/* O(1) deduplication check across branches */
+	hash_for_each_possible(nfi->dirent_hashtable, nd, hash, hash_val) {
+		if (nd->len == namelen && strncmp(nd->name, name, namelen) == 0) {
+			return 0; /* Already in cache, skip */
+		}
+	}
 
     /* Check if this is the entry we are targeting for injection */
     if (sbi->has_inject && namelen == strlen(sbi->inject_name) &&
@@ -241,60 +289,106 @@ static int nomount_filldir(struct dir_context *ctx, const char *name, int namele
         d_type = DT_REG; 
     }
 
-    /* Pass the entry back to the original VFS actor */
-    return buf->orig_ctx->actor(buf->orig_ctx, name, namelen, offset, ino, d_type);
+	/* Add to deduplication hash table and ordered list */
+	nd = kmalloc(sizeof(*nd), GFP_KERNEL);
+	if (nd) {
+		nd->name = kstrndup(name, namelen, GFP_KERNEL);
+		nd->len = namelen;
+		nd->ino = ino;
+		nd->d_type = d_type;
+		
+		hash_add(nfi->dirent_hashtable, &nd->hash, hash_val);
+		list_add_tail(&nd->list, &nfi->dirents_list);
+	}
+
+    return 0;
 }
 
 #if defined(HAVE_ITERATE_SHARED) || defined(HAVE_ITERATE)
 int nomount_iterate(struct file *file, struct dir_context *ctx)
 {
-    struct file *lower_file = nomount_lower_file(file);
     struct nomount_sb_info *sbi = NOMOUNT_SB(file->f_inode->i_sb);
     struct nomount_file_info *nfi = NOMOUNT_F(file);
-    int err;
+    int err = 0;
     bool is_root = (file->f_path.dentry == file->f_inode->i_sb->s_root);
+	int i;
+	int emit_idx = 0;
+	struct nomount_dirent *nd, *tmp;
 
-    /* If no injection is active or we are not in the root dir, pass-through */
-    if (!is_root || !sbi->has_inject) {
+	mutex_lock(&nfi->readdir_mutex);
+
+	/* Populate cache if starting from the beginning */
+	if (ctx->pos == 0) {
+		list_for_each_entry_safe(nd, tmp, &nfi->dirents_list, list) {
+			hash_del(&nd->hash);
+			list_del(&nd->list);
+			kfree(nd->name);
+			kfree(nd);
+		}
+		hash_init(nfi->dirent_hashtable);
+		nfi->ghost_emitted = false;
+
+		/* Read all lower branches into memory to deduplicate safely */
+		for (i = 0; i < nfi->num_lower_files; i++) {
+			struct file *lower_file = nfi->lower_files[i];
+
+			lower_file->f_pos = 0; /* Always scan full directory from start */
+
+			struct nomount_readdir_data buf = {
+				.ctx.actor = nomount_filldir_cache,
+				.ctx.pos = 0,
+				.orig_ctx = ctx,
+				.sbi = sbi,
+				.nfi = nfi,
+				.branch_idx = i
+			};
+
 #ifdef HAVE_ITERATE_SHARED
-        err = iterate_dir(lower_file, ctx);
+			err = iterate_dir(lower_file, &buf.ctx);
 #else
-        if (!lower_file->f_op->iterate) return -ENOTDIR;
-        err = lower_file->f_op->iterate(lower_file, ctx);
+			if (!lower_file->f_op->iterate) {
+				err = -ENOTDIR;
+				break;
+			}
+			err = lower_file->f_op->iterate(lower_file, &buf.ctx);
 #endif
-        file->f_pos = lower_file->f_pos;
-        return err;
-    }
+			if (err < 0) break;
+		}
 
-    /* Prepare the interception buffer */
-    struct nomount_readdir_data buf = {
-        .ctx.actor = nomount_filldir,
-        .ctx.pos = ctx->pos,
-        .orig_ctx = ctx,
-        .sbi = sbi,
-        .nfi = nfi
-    };
+		/* Inject ghost file if it was missing in the cache */
+		if (err >= 0 && is_root && sbi->has_inject && !nfi->ghost_emitted) {
+			u64 fake_ino = d_inode(sbi->inject_path.dentry)->i_ino;
+			
+			nd = kmalloc(sizeof(*nd), GFP_KERNEL);
+			if (nd) {
+				u32 ghost_hash = full_name_hash(NULL, sbi->inject_name, strlen(sbi->inject_name));
+				
+				nd->name = kstrdup(sbi->inject_name, GFP_KERNEL);
+				nd->len = strlen(sbi->inject_name);
+				nd->ino = fake_ino;
+				nd->d_type = DT_REG;
+				
+				hash_add(nfi->dirent_hashtable, &nd->hash, ghost_hash);
+				list_add_tail(&nd->list, &nfi->dirents_list);
+			}
+			nfi->ghost_emitted = true;
+		}
+	}
 
-    /* Execute the iteration on the lower filesystem using our actor */
-#ifdef HAVE_ITERATE_SHARED
-    err = iterate_dir(lower_file, &buf.ctx);
-#else
-    err = lower_file->f_op->iterate(lower_file, &buf.ctx);
-#endif
+	/* Emit entries sequentially from cache using simple integer pos */
+	list_for_each_entry(nd, &nfi->dirents_list, list) {
+		if (emit_idx >= ctx->pos) {
+			if (!dir_emit(ctx, nd->name, nd->len, nd->ino, nd->d_type)) {
+				break; /* User buffer is full, pause here */
+			}
+			ctx->pos++;
+		}
+		emit_idx++;
+	}
 
-    /* Sync positions back to the original context and file */
-    ctx->pos = buf.ctx.pos;
-    file->f_pos = lower_file->f_pos;
+	file->f_pos = ctx->pos;
 
-    if (err >= 0 && !nfi->ghost_emitted) {
-        u64 fake_ino = d_inode(sbi->inject_path.dentry)->i_ino;
-        
-        if (dir_emit(ctx, sbi->inject_name, strlen(sbi->inject_name), fake_ino, DT_REG)) {
-            nfi->ghost_emitted = true;
-            ctx->pos++;
-            file->f_pos = ctx->pos;
-        }
-    }
+	mutex_unlock(&nfi->readdir_mutex);
     return err;
 }
 #else
@@ -302,6 +396,8 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
  */
 int nomount_readdir(struct file *file, void *dirent, filldir_t filldir)
 {
+	/* Too complex to cleanly support unioning on legacy without custom state tracking.
+     * We fallback to single layer for ancient kernels */
     struct file *lower_file = nomount_lower_file(file);
     struct nomount_sb_info *sbi = NOMOUNT_SB(file->f_inode->i_sb);
     struct nomount_file_info *nfi = NOMOUNT_F(file);

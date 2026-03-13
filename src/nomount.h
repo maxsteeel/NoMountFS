@@ -11,6 +11,8 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
+#include <linux/hashtable.h>
+#include <linux/hash.h>
 #include <linux/mount.h>
 #include <linux/namei.h>
 #include <linux/seq_file.h>
@@ -31,6 +33,9 @@
 
 /* Nomountfs magic number */
 #define NOMOUNT_FS_MAGIC 0xF18F
+
+/* Max number of stacked directories */
+#define NOMOUNT_MAX_BRANCHES 5
 
 /* Operations vectors defined in specific files */
 extern const struct file_operations nomount_main_fops;
@@ -71,11 +76,27 @@ extern int nomount_mmap(struct file *file, struct vm_area_struct *vma);
 extern int nomount_test_inode(struct inode *inode, void *data);
 extern int nomount_set_inode(struct inode *inode, void *data);
 
-/* File private data: link to the real underlying file */
+/* Used to track already emitted dirents for deduplication */
+struct nomount_dirent {
+	struct hlist_node hash; /* For fast O(1) deduplication lookups */
+	struct list_head list;  /* For ordered O(1) emissions */
+	char *name;
+	int len;
+	u64 ino;
+	unsigned int d_type;
+};
+
+/* File private data: link to the real underlying file(s) */
 struct nomount_file_info {
-	struct file *lower_file;
+	struct file *lower_files[NOMOUNT_MAX_BRANCHES];
+	int num_lower_files;
 	const struct vm_operations_struct *lower_vm_ops;
 	bool ghost_emitted;
+	
+	/* For readdir deduplication */
+	DECLARE_HASHTABLE(dirent_hashtable, 8); /* 2^8 = 256 buckets */
+	struct list_head dirents_list;          /* Ordered emission list */
+	struct mutex readdir_mutex;
 };
 
 /* Nomountfs inode data in memory */
@@ -86,14 +107,16 @@ struct nomount_inode_info {
 
 /* Nomountfs dentry data in memory */
 struct nomount_dentry_info {
-	spinlock_t lock;	/* Protects lower_path */
-	struct path lower_path;
+	spinlock_t lock;	/* Protects lower_paths */
+	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
+	int num_lower_paths;
 };
 
 /* Nomountfs super-block data in memory */
 struct nomount_sb_info {
 	struct super_block *lower_sb;
-	struct path lower_path;
+	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
+	int num_lower_paths;
 	bool has_inject;
 	char inject_name[NAME_MAX]; /* Name of the file to intercept */
 	struct path inject_path;    /* Actual path of the modified file */
@@ -122,7 +145,7 @@ static inline struct nomount_inode_info *NOMOUNT_I(const struct inode *inode)
 /* Helper functions to get/set lower (real) objects */
 static inline struct file *nomount_lower_file(const struct file *f)
 {
-	return NOMOUNT_F(f)->lower_file;
+	return NOMOUNT_F(f)->lower_files[0]; /* Return topmost file for general I/O */
 }
 
 static inline struct inode *nomount_lower_inode(const struct inode *i)
@@ -146,14 +169,42 @@ static inline void pathcpy(struct path *dst, const struct path *src)
 static inline void nomount_get_lower_path(const struct dentry *dent, struct path *lower_path)
 {
 	spin_lock(&NOMOUNT_D(dent)->lock);
-	pathcpy(lower_path, &NOMOUNT_D(dent)->lower_path);
-	path_get(lower_path);
+	if (NOMOUNT_D(dent)->num_lower_paths > 0) {
+		pathcpy(lower_path, &NOMOUNT_D(dent)->lower_paths[0]);
+		path_get(lower_path);
+	} else {
+		lower_path->dentry = NULL;
+		lower_path->mnt = NULL;
+	}
 	spin_unlock(&NOMOUNT_D(dent)->lock);
 }
 
 static inline void nomount_put_lower_path(const struct dentry *dent, struct path *lower_path)
 {
-	path_put(lower_path);
+	if (lower_path->dentry)
+		path_put(lower_path);
+}
+
+static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct path *lower_paths)
+{
+	int i, num;
+	spin_lock(&NOMOUNT_D(dent)->lock);
+	num = NOMOUNT_D(dent)->num_lower_paths;
+	for (i = 0; i < num; i++) {
+		pathcpy(&lower_paths[i], &NOMOUNT_D(dent)->lower_paths[i]);
+		path_get(&lower_paths[i]);
+	}
+	spin_unlock(&NOMOUNT_D(dent)->lock);
+	return num;
+}
+
+static inline void nomount_put_all_lower_paths(const struct dentry *dent, struct path *lower_paths, int num)
+{
+	int i;
+	for (i = 0; i < num; i++) {
+		if (lower_paths[i].dentry)
+			path_put(&lower_paths[i]);
+	}
 }
 
 /* Helpers to set private data  */
@@ -164,7 +215,17 @@ static inline void nomount_set_lower_inode(struct inode *inode, struct inode *lo
 
 static inline void nomount_set_lower_path(struct dentry *dent, struct path *lower_path)
 {
-	pathcpy(&NOMOUNT_D(dent)->lower_path, lower_path);
+	pathcpy(&NOMOUNT_D(dent)->lower_paths[0], lower_path);
+	NOMOUNT_D(dent)->num_lower_paths = 1;
+}
+
+static inline void nomount_set_lower_paths(struct dentry *dent, struct path *lower_paths, int num_paths)
+{
+	int i;
+	for (i = 0; i < num_paths; i++) {
+		pathcpy(&NOMOUNT_D(dent)->lower_paths[i], &lower_paths[i]);
+	}
+	NOMOUNT_D(dent)->num_lower_paths = num_paths;
 }
 
 /* Locking helpers for directory operations */
