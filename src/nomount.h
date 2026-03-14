@@ -45,7 +45,7 @@ extern const struct inode_operations nomount_dir_iops;
 extern const struct inode_operations nomount_symlink_iops;
 extern const struct super_operations nomount_sops;
 extern const struct dentry_operations nomount_dops;
-extern const struct address_space_operations nomount_aops, nomount_dummy_aops;
+extern const struct address_space_operations nomount_aops;
 extern const struct vm_operations_struct nomount_vm_ops;
 extern const struct export_operations nomount_export_ops;
 extern const struct xattr_handler *nomount_xattr_handlers[];
@@ -120,6 +120,11 @@ struct nomount_sb_info {
 	bool has_inject;
 	char inject_name[NAME_MAX]; /* Name of the file to intercept */
 	struct path inject_path;    /* Actual path of the modified file */
+	/* Original path strings saved for /proc/mounts show_options.
+	 * d_path() on private vfsmount clones returns "/" — unusable.
+	 * Store the strings from the mount options directly instead. */
+	char lower_path_strs[NOMOUNT_MAX_BRANCHES][PATH_MAX];
+	char inject_path_str[PATH_MAX];
 };
 
 /* Structure to safely pass assembly data to fill_super */

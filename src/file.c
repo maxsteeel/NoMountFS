@@ -49,18 +49,19 @@ static int nomount_open(struct inode *inode, struct file *file)
 
 	if (err && info->num_lower_files == 0) {
 		kfree(info);
+		return err;
 	} else if (err) {
-		/* Failed to open all directories, close what we opened */
+		/* Failed partway through opening directories; close what we opened */
 		for (i = 0; i < info->num_lower_files; i++) {
 			fput(info->lower_files[i]);
 		}
 		kfree(info);
+		return err;
 	} else {
 		file->private_data = info;
 		fsstack_copy_attr_all(inode, nomount_lower_inode(inode));
 	}
-
-	return err;
+	return 0;
 }
 
 /* * nomount_release: close the lower file when the virtual one is closed.

@@ -5,6 +5,7 @@
 
 #include "nomount.h"
 #include "compat.h"
+#include <linux/xattr.h>
 
 static int nomount_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool want_excl)
 {
@@ -219,23 +220,41 @@ static int nomount_setattr(struct dentry *dentry, struct iattr *ia)
 	struct inode *inode = d_inode(dentry);
 	struct inode *lower_inode = nomount_lower_inode(inode);
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
+	err = setattr_prepare(&init_user_ns, dentry, ia);
+#else
 	err = setattr_prepare(dentry, ia);
+#endif
 	if (err) return err;
 
 	nomount_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
 
+	inode_lock(lower_inode);
+
 	if (ia->ia_valid & ATTR_SIZE) {
 		err = inode_newsize_ok(inode, ia->ia_size);
-		if (err) goto out;
-		truncate_setsize(inode, ia->ia_size);
+		if (err) {
+			inode_unlock(lower_inode);
+			goto out;
+		}
+		/*
+		 * Truncate the lower inode first (via notify_change), then
+		 * sync the size up to the upper inode. Doing truncate_setsize
+		 * on the upper before the lower creates a window where the VFS
+		 * sees a larger size than what is actually on disk.
+		 */
+		ia->ia_valid |= ATTR_FILE;
 	}
 
-	inode_lock(lower_inode);
 	err = notify_change(lower_dentry, ia, NULL);
 	inode_unlock(lower_inode);
 
-	if (!err) fsstack_copy_attr_all(inode, lower_inode);
+	if (!err) {
+		if (ia->ia_valid & ATTR_SIZE)
+			truncate_setsize(inode, ia->ia_size);
+		fsstack_copy_attr_all(inode, lower_inode);
+	}
 
 out:
 	nomount_put_lower_path(dentry, &lower_path);
@@ -247,21 +266,40 @@ out:
 static ssize_t nomount_getxattr(struct dentry *dentry, struct inode *inode,
 			       const char *name, void *buffer, size_t size)
 {
-	struct dentry *lower_dentry;
-	struct path lower_path;
-	ssize_t err;
+	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
+	int num_paths;
+	ssize_t err = -EOPNOTSUPP;
 
-	nomount_get_lower_path(dentry, &lower_path);
-	lower_dentry = lower_path.dentry;
+	num_paths = nomount_get_all_lower_paths(dentry, lower_paths);
+	if (num_paths == 0)
+		return -EOPNOTSUPP;
 
-	if (!(d_inode(lower_dentry)->i_opflags & IOP_XATTR)) {
-		err = -EOPNOTSUPP;
-		goto out;
+	if (!strcmp(name, XATTR_NAME_SELINUX)) {
+		/*
+		 * Always inherit the SELinux label from the lowermost layer
+		 * (the original file in /system). The label belongs to the
+		 * path, not the file content — a replacement file should carry
+		 * exactly the same policy as the original it shadows, regardless
+		 * of whatever xattr the upperdir file has on /data.
+		 * If the path is new (no lowerdir counterpart), the dentry is
+		 * negative and we fall through to -EOPNOTSUPP → genfscon.
+		 */
+		struct dentry *ld = lower_paths[num_paths - 1].dentry;
+		if (!d_is_positive(ld) ||
+		    !(d_inode(ld)->i_opflags & IOP_XATTR))
+			err = -EOPNOTSUPP;
+		else
+			err = vfs_getxattr(ld, name, buffer, size);
+	} else {
+		struct dentry *ld = lower_paths[0].dentry;
+		if (!d_is_positive(ld) ||
+		    !(d_inode(ld)->i_opflags & IOP_XATTR))
+			err = -EOPNOTSUPP;
+		else
+			err = vfs_getxattr(ld, name, buffer, size);
 	}
 
-	err = vfs_getxattr(lower_dentry, name, buffer, size);
-out:
-	nomount_put_lower_path(dentry, &lower_path);
+	nomount_put_all_lower_paths(dentry, lower_paths, num_paths);
 	return err;
 }
 
