@@ -21,6 +21,7 @@
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 5, 0)
     #define inode_lock(inode) mutex_lock(&(inode)->i_mutex)
     #define inode_unlock(inode) mutex_unlock(&(inode)->i_mutex)
+    #define inode_lock_nested(inode, subclass) mutex_lock_nested(&(inode)->i_mutex, (subclass))
 #endif
 
 /* * Dentry alias list handling.
@@ -117,6 +118,59 @@ static inline bool nomount_is_dir(const struct inode *inode)
     {
         return dentry->d_inode == NULL;
     }
+#endif
+
+/*
+ * nomount_clone_private_mount: clone a vfsmount privately so it is
+ * detached from the mount namespace.
+ *
+ * A private clone is not visible to follow_mount/lookup_mnt in the
+ * public namespace, so dentry_open through it always reaches the real
+ * underlying filesystem directly — even when nomountfs is mounted over
+ * the same path as one of its lower layers.
+ *
+ * clone_private_mount() was added in 3.18 but is not always exported
+ * to out-of-tree modules on Android kernels. When NOMOUNT_NO_CLONE_PRIVATE_MOUNT
+ * is defined (set by Makefile when the symbol isn't found in fs/namespace.c),
+ * we resolve it at runtime via kallsyms_lookup_name instead.
+ *
+ * Returns ERR_PTR on error, never NULL.
+ */
+#include <linux/mount.h>
+#include <linux/kallsyms.h>
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0)
+
+#ifdef NOMOUNT_NO_CLONE_PRIVATE_MOUNT
+typedef struct vfsmount *(*clone_private_mount_fn_t)(const struct path *);
+static inline struct vfsmount *nomount_clone_private_mount(struct path *path)
+{
+	static clone_private_mount_fn_t fn;
+	struct vfsmount *mnt;
+	if (!fn)
+		fn = (clone_private_mount_fn_t)
+			kallsyms_lookup_name("clone_private_mount");
+	if (!fn) {
+		mnt = mntget(path->mnt);
+		return mnt ? mnt : ERR_PTR(-ENOMEM);
+	}
+	mnt = fn(path);
+	return mnt ? mnt : ERR_PTR(-ENOMEM);
+}
+#else
+static inline struct vfsmount *nomount_clone_private_mount(struct path *path)
+{
+	struct vfsmount *mnt = clone_private_mount(path);
+	return mnt ? mnt : ERR_PTR(-ENOMEM);
+}
+#endif
+
+#else /* kernel < 3.18 */
+static inline struct vfsmount *nomount_clone_private_mount(struct path *path)
+{
+	struct vfsmount *mnt = mntget(path->mnt);
+	return mnt ? mnt : ERR_PTR(-ENOMEM);
+}
 #endif
 
 #endif /* _NOMOUNT_COMPAT_H_ */
