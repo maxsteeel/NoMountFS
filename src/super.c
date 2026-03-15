@@ -511,7 +511,7 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		unsigned int ctxlen = 0;
 		int sec_err = security_inode_getsecctx(root_lower, (void **)&ctx, &ctxlen);
 		if (sec_err == 0 && ctx) {
-			int notify_err = security_inode_notifysecctx(sb->s_root->d_inode, ctx, ctxlen);
+			security_inode_notifysecctx(sb->s_root->d_inode, ctx, ctxlen);
 			security_release_secctx(ctx, ctxlen);
 		}
 	}

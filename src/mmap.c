@@ -125,7 +125,6 @@ int nomount_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	int err = 0;
 	struct file *lower_file = nomount_lower_file(file);
-	const struct vm_operations_struct *saved_vm_ops = NULL;
 
 	if (!lower_file->f_op->mmap)
 		return -ENODEV;

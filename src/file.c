@@ -331,18 +331,16 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 
 		/* Read all lower branches into memory to deduplicate safely */
 		for (i = 0; i < nfi->num_lower_files; i++) {
+			struct nomount_readdir_data buf;
 			struct file *lower_file = nfi->lower_files[i];
 
 			lower_file->f_pos = 0; /* Always scan full directory from start */
-
-			struct nomount_readdir_data buf = {
-				.ctx.actor = nomount_filldir_cache,
-				.ctx.pos = 0,
-				.orig_ctx = ctx,
-				.sbi = sbi,
-				.nfi = nfi,
-				.branch_idx = i
-			};
+			buf.ctx.actor = nomount_filldir_cache;
+			buf.ctx.pos = 0;
+			buf.orig_ctx = ctx;
+			buf.sbi = sbi;
+			buf.nfi = nfi;
+			buf.branch_idx = i;
 
 #ifdef HAVE_ITERATE_SHARED
 			err = iterate_dir(lower_file, &buf.ctx);

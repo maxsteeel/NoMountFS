@@ -1,0 +1,7 @@
+id=meta-nomountfs
+metamodule=true
+name=NoMountFS Metamodule
+version=v2.3
+versionCode=6
+author=A7mdwassa
+description=KernelSU metamodule that merges all enabled modules into one nomountfs mount per partition. Supports layer stacking via mount_order file in metamodule dir. Requires NoMountFS .ko (Linux 3.x–6.x).
