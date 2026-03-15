@@ -91,23 +91,6 @@ umount <target_file_or_directory>
 
 ---
 
-## SELinux Configuration
-
-While NoMountFS perfectly preserves and forwards `xattr` security contexts, Android's SELinux implementation (LSM) enforces a strict whitelist of known filesystems (`fs_use_xattr`). Because NoMountFS is an out-of-tree filesystem, SELinux may treat its contents as `unlabeled`, causing `Zygote` or `appdomain` to crash when attempting to map the injected APKs under `Enforcing` mode.
-
-To resolve this without disabling SELinux (`setenforce 0`), you must inject live policies into the kernel's RAM. If you are using Magisk or KernelSU, create a boot script (e.g., in `/data/adb/post-fs-data.d/`) with the following commands:
-
-```bash
-#!/system/bin/sh
-magiskpolicy --live "allow appdomain unlabeled file { getattr open read map execute }"
-magiskpolicy --live "allow zygote unlabeled file { getattr open read map execute }"
-
-```
-
-This grants the Android application runtime permission to execute code from the NoMountFS virtual layer while keeping the rest of the device strictly secure.
-
----
-
 ## Architecture & Development   
 
 NoMountFS acts as a proxy layer between the VFS and the lower underlying filesystem (e.g., `ext4`, `f2fs`).

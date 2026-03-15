@@ -467,7 +467,7 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		goto out_put_inject;
 	}
 
-	root_inode = nomount_iget(sb, d_inode(sbi->lower_paths[0].dentry));
+	root_inode = nomount_iget(sb, d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry));
 	if (IS_ERR(root_inode)) {
 		err = PTR_ERR(root_inode);
 		goto out_put_inject;
@@ -493,6 +493,28 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	d_set_d_op(sb->s_root, &nomount_dops);
 
 	/* d_make_root already hashes the dentry, no need to rehash */
+
+	err = security_sb_set_mnt_opts(sb, NULL, 0, NULL);
+	pr_err("NoMountFS: security_sb_set_mnt_opts ret=%d\n", err);
+	if (err && err != -EOPNOTSUPP) {
+		pr_warn("NoMountFS: security_sb_set_mnt_opts failed: %d\n", err);
+		err = 0;
+	}
+
+	/* Now that SBLABEL_MNT is set, label the root inode from lower */
+	{
+		struct inode *root_lower = d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry);
+		char *ctx = NULL;
+		unsigned int ctxlen = 0;
+		int sec_err = security_inode_getsecctx(root_lower, (void **)&ctx, &ctxlen);
+		pr_err("NoMountFS: root relabel ino=%lu err=%d ctx=%s\n",
+			root_lower->i_ino, sec_err, (sec_err == 0 && ctx) ? ctx : "NULL");
+		if (sec_err == 0 && ctx) {
+			int notify_err = security_inode_notifysecctx(sb->s_root->d_inode, ctx, ctxlen);
+			pr_err("NoMountFS: root notifysecctx err=%d\n", notify_err);
+			security_release_secctx(ctx, ctxlen);
+		}
+	}
 
 	return 0;
 

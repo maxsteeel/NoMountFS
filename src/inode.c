@@ -275,21 +275,13 @@ static ssize_t nomount_getxattr(struct dentry *dentry, struct inode *inode,
 		return -EOPNOTSUPP;
 
 	if (!strcmp(name, XATTR_NAME_SELINUX)) {
-		/*
-		 * Always inherit the SELinux label from the lowermost layer
-		 * (the original file in /system). The label belongs to the
-		 * path, not the file content — a replacement file should carry
-		 * exactly the same policy as the original it shadows, regardless
-		 * of whatever xattr the upperdir file has on /data.
-		 * If the path is new (no lowerdir counterpart), the dentry is
-		 * negative and we fall through to -EOPNOTSUPP → genfscon.
-		 */
-		struct dentry *ld = lower_paths[num_paths - 1].dentry;
-		if (!d_is_positive(ld) ||
-		    !(d_inode(ld)->i_opflags & IOP_XATTR))
-			err = -EOPNOTSUPP;
-		else
-			err = vfs_getxattr(ld, name, buffer, size);
+	    struct dentry *ld = lower_paths[num_paths - 1].dentry;
+	    
+	    if (d_is_positive(ld) && d_inode(ld)->i_sb->s_xattr) {
+	        err = __vfs_getxattr(ld, d_inode(ld), name, buffer, size, 0);
+	    } else {
+	        err = -EOPNOTSUPP;
+	    }
 	} else {
 		struct dentry *ld = lower_paths[0].dentry;
 		if (!d_is_positive(ld) ||

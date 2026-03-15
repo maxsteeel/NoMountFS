@@ -1,7 +1,7 @@
 /*
  * NoMountFS: Path Resolution and Inode Management
  */
-
+#include <linux/security.h>
 #include "nomount.h"
 #include "compat.h"
 
@@ -73,6 +73,20 @@ struct inode *nomount_iget(struct super_block *sb, struct inode *lower_inode)
 	fsstack_copy_attr_all(inode, lower_inode);
 	fsstack_copy_inode_size(inode, lower_inode);
 
+	/* Copy SELinux label from lower inode.
+	 * Works for all inodes accessed after fill_super completes
+	 * (SBLABEL_MNT set). Root inode is relabeled separately in
+	 * fill_super after security_sb_set_mnt_opts.
+	 */
+	{
+		char *ctx = NULL;
+		unsigned int ctxlen = 0;
+		if (security_inode_getsecctx(lower_inode, (void **)&ctx, &ctxlen) == 0 && ctx) {
+			security_inode_notifysecctx(inode, ctx, ctxlen);
+			security_release_secctx(ctx, ctxlen);
+		}
+	}
+
 	unlock_new_inode(inode);
 	return inode;
 }
@@ -85,7 +99,6 @@ struct dentry *__nomount_interpose(struct dentry *dentry,
 {
 	struct inode *inode;
 	struct inode *lower_inode = d_inode(lower_path->dentry);
-	struct super_block *lower_sb = NOMOUNT_SB(sb)->lower_sb;
 
 	inode = nomount_iget(sb, lower_inode);
 	if (IS_ERR(inode))
