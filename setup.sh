@@ -1,6 +1,5 @@
 #!/bin/sh
 set -eu
-
 GKI_ROOT=$(pwd)
 OWNER="maxsteeel"
 REPO="NoMountFS"
@@ -21,22 +20,80 @@ initialize_variables() {
         echo '[ERROR] "fs/" directory not found. Are you in the kernel root?'
         exit 127
     fi
-
     FS_MAKEFILE=$FS_DIR/Makefile
     FS_KCONFIG=$FS_DIR/Kconfig
+
+    # Resolve hooks.c path (GKI layout vs flat layout)
+    if [ -f "$GKI_ROOT/common/security/selinux/hooks.c" ]; then
+        SELINUX_HOOKS="$GKI_ROOT/common/security/selinux/hooks.c"
+    elif [ -f "$GKI_ROOT/security/selinux/hooks.c" ]; then
+        SELINUX_HOOKS="$GKI_ROOT/security/selinux/hooks.c"
+    else
+        SELINUX_HOOKS=""
+    fi
+}
+
+patch_selinux_hooks() {
+    if [ -z "$SELINUX_HOOKS" ]; then
+        echo "[!] security/selinux/hooks.c not found, skipping SELinux patch."
+        return
+    fi
+
+    if grep -q 'CONFIG_NOMOUNT_FS' "$SELINUX_HOOKS"; then
+        echo "[-] SELinux hooks.c already patched, skipping."
+        return
+    fi
+
+    if ! grep -q 'If this is a user namespace mount' "$SELINUX_HOOKS"; then
+        echo "[!] Anchor not found in hooks.c, skipping SELinux patch."
+        return
+    fi
+
+    ANCHOR_LINE=$(grep -n 'If this is a user namespace mount' "$SELINUX_HOOKS" | cut -d: -f1)
+    INSERT_BEFORE=$((ANCHOR_LINE - 1))
+
+    sed -i "${INSERT_BEFORE}i\\
+#ifdef CONFIG_NOMOUNT_FS\\
+\t/* NoMountFS inherits labels directly from lower inodes via\\
+\t * security_inode_notifysecctx \xe2\x80\x94 use NATIVE behavior so\\
+\t * SBLABEL_MNT is set and notifysecctx can set LABEL_INITIALIZED.\\
+\t */\\
+\tif (!strcmp(sb->s_type->name, \"nomountfs\"))\\
+\t\tsbsec->behavior = SECURITY_FS_USE_NATIVE;\\
+#endif\\
+" "$SELINUX_HOOKS"
+
+    echo "[+] Patched security/selinux/hooks.c"
+}
+
+unpatch_selinux_hooks() {
+    if [ -z "$SELINUX_HOOKS" ]; then
+        return
+    fi
+
+    if ! grep -q 'CONFIG_NOMOUNT_FS' "$SELINUX_HOOKS"; then
+        return
+    fi
+
+    # Remove the ifdef block and the trailing blank line after #endif
+    sed -i '/#ifdef CONFIG_NOMOUNT_FS/,/#endif/{N;/^#endif\n$/d;d}' "$SELINUX_HOOKS" 2>/dev/null || \
+    sed -i '/#ifdef CONFIG_NOMOUNT_FS/,/#endif/d' "$SELINUX_HOOKS"
+
+    echo "[-] SELinux hooks.c patch reverted."
 }
 
 perform_cleanup() {
     echo "[+] Cleaning up NoMountFS..."
     [ -L "$FS_DIR/nomount" ] && rm "$FS_DIR/nomount" && echo "[-] Symlink removed."
-
     if [ -f "$FS_MAKEFILE" ]; then
         sed -i '/nomount/d' "$FS_MAKEFILE" && echo "[-] Makefile reverted."
     fi
     if [ -f "$FS_KCONFIG" ]; then
         sed -i '/nomount\/Kconfig/d' "$FS_KCONFIG" && echo "[-] Kconfig reverted."
     fi
-    
+
+    unpatch_selinux_hooks
+
     if [ -d "$GKI_ROOT/$REPO" ]; then
         echo "[?] Do you want to delete the repository directory $REPO? (y/n)"
         read -r answer
@@ -49,39 +106,34 @@ perform_cleanup() {
 
 setup_nomountfs() {
     echo "[+] Setting up NoMountFS..."
-
     if [ ! -d "$GKI_ROOT/$REPO" ]; then
         git clone "https://github.com/$OWNER/$REPO" || { echo "[!] Clone failed"; exit 1; }
     fi
-
     cd "$GKI_ROOT/$REPO"
     git fetch --all
-
     if [ -z "${1-}" ]; then
         TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
         if [ -n "$TAG" ]; then
             git checkout "$TAG" && echo "[-] Checked out tag $TAG"
         else
-
             git checkout master 2>/dev/null || echo "[!] Using current branch"
         fi
     else
         git checkout "$1" && echo "[-] Checked out $1."
     fi
-
     cd "$FS_DIR"
     ln -sf "$(realpath --relative-to="$FS_DIR" "$GKI_ROOT/$REPO/src")" "nomount"
     echo "[+] Symlink created: fs/nomount -> $REPO/src"
-
     if ! grep -q "nomount" "$FS_MAKEFILE"; then
         printf "obj-\$(CONFIG_NOMOUNT_FS) += nomount/\n" >> "$FS_MAKEFILE"
         echo "[+] Modified fs/Makefile"
     fi
-
     if ! grep -q "nomount/Kconfig" "$FS_KCONFIG"; then
         sed -i '$i source "fs/nomount/Kconfig"' "$FS_KCONFIG"
         echo "[+] Modified fs/Kconfig"
     fi
+
+    patch_selinux_hooks
 
     echo '[+] NoMountFS is ready to be compiled!'
     echo '[+] Run: make menuconfig and look for NoMountFS under File Systems'
