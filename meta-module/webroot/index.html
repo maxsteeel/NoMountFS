@@ -629,31 +629,46 @@ async function handleMountToggle(mod, card, btn) {
       const modDir  = MODULES_DIR + '/' + mod.id + '/' + part;
       const merge   = MERGE_BASE + '/' + part;
 
-      // Step 1: inject this module's files into the merge tree
-      // Use cp -rn (no-clobber) so higher-priority files already there win
+      // Step 1: inject this module's files into the merge tree.
+      // cp -r -f (force/overwrite) so the highest-priority module wins.
+      // The old -rn (no-clobber) was wrong: whichever module populated the
+      // merge tree first would permanently win regardless of mount_order.
       const inject = await sh(
         '[ -d ' + JSON.stringify(modDir) + ' ] && ' +
         'mkdir -p ' + JSON.stringify(merge) + ' && ' +
-        'cp -rn ' + JSON.stringify(modDir) + '/. ' + JSON.stringify(merge) + '/ 2>/dev/null; echo $?'
+        'cp -r -f ' + JSON.stringify(modDir) + '/. ' + JSON.stringify(merge) + '/ 2>/dev/null; echo $?'
       );
 
-      // Step 2: relabel injected files
+      // Step 2: relabel injected files.
+      // Read the real file's context from the live partition via getfilecon so
+      // each file gets the exact same label its original has.  The old code
+      // stamped a hardcoded "system_file" on everything, which is wrong for
+      // /vendor/, /product/, etc. and causes SELinux denials.
       await sh(
-        'find ' + JSON.stringify(merge) + ' \( -type f -o -type l \) 2>/dev/null | ' +
-        'while read F; do chcon u:object_r:system_file:s0 "$F" 2>/dev/null; done'
+        'MDIR=' + JSON.stringify(modDir) + '; ' +
+        'DEST_ROOT=/' + part + '; ' +
+        'find ' + JSON.stringify(modDir) + ' \( -type f -o -type l \) 2>/dev/null | ' +
+        'while read F; do ' +
+        '  REL=$(echo "$F" | sed "s|^$MDIR||"); ' +
+        '  DEST_PATH="$DEST_ROOT$REL"; ' +
+        '  CTX=$(getfilecon "$DEST_PATH" 2>/dev/null | awk \'{print $NF}\'); ' +
+        '  case "$CTX" in u:object_r:*:s0*) ;; ' +
+        '    *) CTX=$(ls -Z "$DEST_PATH" 2>/dev/null | awk \'{for(i=1;i<=NF;i++) if($i~/^u:object_r:/) {print $i; exit}}\') ;; ' +
+        '  esac; ' +
+        '  case "$CTX" in u:object_r:*:s0*) chcon "$CTX" ' + JSON.stringify(merge) + '$REL 2>/dev/null ;; esac; ' +
+        'done'
       );
 
-      // Step 3: mount if not already mounted
-      const alreadyMounted = await sh(
-        'grep -q " ' + tgt + ' nomountfs " /proc/mounts 2>/dev/null && echo 1 || echo 0'
+      // Step 3: always umount then remount so the VFS dentry cache is
+      // invalidated and the kernel picks up what was just written to the merge
+      // tree.  The old code skipped the mount when already mounted, leaving
+      // stale dentries in place — newly injected files were silently ignored.
+      await exec('umount ' + JSON.stringify(tgt) + ' 2>/dev/null; true');
+      const r = await exec(
+        'mount -t nomountfs none ' + JSON.stringify(tgt) +
+        ' -o upperdir=' + JSON.stringify(merge) + ',lowerdir=' + JSON.stringify(tgt) + ' 2>&1'
       );
-      if (alreadyMounted !== '1') {
-        const r = await exec(
-          'mount -t nomountfs none ' + JSON.stringify(tgt) +
-          ' -o upperdir=' + JSON.stringify(merge) + ',lowerdir=' + JSON.stringify(tgt) + ' 2>&1'
-        );
-        if (r.errno !== 0) { allOk = false; }
-      }
+      if (r.errno !== 0) { allOk = false; }
     }
 
     if (allOk) {
