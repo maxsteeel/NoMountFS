@@ -510,11 +510,8 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		char *ctx = NULL;
 		unsigned int ctxlen = 0;
 		int sec_err = security_inode_getsecctx(root_lower, (void **)&ctx, &ctxlen);
-		pr_err("NoMountFS: root relabel ino=%lu err=%d ctx=%s\n",
-			root_lower->i_ino, sec_err, (sec_err == 0 && ctx) ? ctx : "NULL");
 		if (sec_err == 0 && ctx) {
 			int notify_err = security_inode_notifysecctx(sb->s_root->d_inode, ctx, ctxlen);
-			pr_err("NoMountFS: root notifysecctx err=%d\n", notify_err);
 			security_release_secctx(ctx, ctxlen);
 		}
 	}
