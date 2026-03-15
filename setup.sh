@@ -82,6 +82,60 @@ unpatch_selinux_hooks() {
     echo "[-] SELinux hooks.c patch reverted."
 }
 
+patch_selinux_hooks_copy_sid() {
+    if [ -z "$SELINUX_HOOKS" ]; then
+        echo "[!] security/selinux/hooks.c not found, skipping copy_sid patch."
+        return
+    fi
+
+    if grep -q 'selinux_sb_copy_sid_from' "$SELINUX_HOOKS"; then
+        echo "[-] SELinux hooks.c copy_sid already patched, skipping."
+        return
+    fi
+
+    if ! grep -q 'Allow filesystems with binary mount data' "$SELINUX_HOOKS"; then
+        echo "[!] copy_sid anchor not found in hooks.c, skipping."
+        return
+    fi
+
+    ANCHOR_LINE=$(grep -n 'Allow filesystems with binary mount data' "$SELINUX_HOOKS" | cut -d: -f1)
+    INSERT_BEFORE=$((ANCHOR_LINE - 1))
+
+    sed -i "${INSERT_BEFORE}i\\
+#ifdef CONFIG_NOMOUNT_FS\\
+void selinux_sb_copy_sid_from(struct super_block *dst, struct super_block *src)\\
+{\\
+\tstruct superblock_security_struct *dst_sbsec = dst->s_security;\\
+\tstruct superblock_security_struct *src_sbsec = src->s_security;\\
+\tdst_sbsec->sid = src_sbsec->sid;\\
+\tdst_sbsec->def_sid = src_sbsec->def_sid;\\
+}\\
+EXPORT_SYMBOL(selinux_sb_copy_sid_from);\\
+#endif\\
+" "$SELINUX_HOOKS"
+
+    echo "[+] Patched security/selinux/hooks.c (copy_sid)"
+}
+
+unpatch_selinux_hooks_copy_sid() {
+    if [ -z "$SELINUX_HOOKS" ]; then
+        return
+    fi
+
+    if ! grep -q 'selinux_sb_copy_sid_from' "$SELINUX_HOOKS"; then
+        return
+    fi
+
+    sed -i '/^#ifdef CONFIG_NOMOUNT_FS$/{
+        N;/selinux_sb_copy_sid_from/!{P;D}
+        :loop
+        N;/^#endif/!b loop
+        N;d
+    }' "$SELINUX_HOOKS"
+
+    echo "[-] SELinux hooks.c copy_sid patch reverted."
+}
+
 perform_cleanup() {
     echo "[+] Cleaning up NoMountFS..."
     [ -L "$FS_DIR/nomount" ] && rm "$FS_DIR/nomount" && echo "[-] Symlink removed."
@@ -93,6 +147,8 @@ perform_cleanup() {
     fi
 
     unpatch_selinux_hooks
+
+    unpatch_selinux_hooks_copy_sid
 
     if [ -d "$GKI_ROOT/$REPO" ]; then
         echo "[?] Do you want to delete the repository directory $REPO? (y/n)"
@@ -134,6 +190,8 @@ setup_nomountfs() {
     fi
 
     patch_selinux_hooks
+
+    patch_selinux_hooks_copy_sid
 
     echo '[+] NoMountFS is ready to be compiled!'
     echo '[+] Run: make menuconfig and look for NoMountFS under File Systems'

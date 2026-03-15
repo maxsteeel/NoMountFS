@@ -7,6 +7,8 @@
 
 #include <linux/security.h>
 
+extern void selinux_sb_copy_sid_from(struct super_block *dst, struct super_block *src);
+
 static struct kmem_cache *nomount_inode_cachep;
 
 /* * nomount_evict_inode: Called when an inode is being removed from memory.
@@ -495,11 +497,12 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	/* d_make_root already hashes the dentry, no need to rehash */
 
 	err = security_sb_set_mnt_opts(sb, NULL, 0, NULL);
-	pr_err("NoMountFS: security_sb_set_mnt_opts ret=%d\n", err);
 	if (err && err != -EOPNOTSUPP) {
-		pr_warn("NoMountFS: security_sb_set_mnt_opts failed: %d\n", err);
+		pr_err("NoMountFS: security_sb_set_mnt_opts failed: %d\n", err);
 		err = 0;
 	}
+	selinux_sb_copy_sid_from(sb,
+		sbi->lower_paths[sbi->num_lower_paths - 1].dentry->d_sb);
 
 	/* Now that SBLABEL_MNT is set, label the root inode from lower */
 	{
