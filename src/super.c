@@ -215,7 +215,7 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	/* 4. Fallback: If there is no 'lowerdir', use the original dev_name */
 	if (!path_to_mount && dev_name && *dev_name) {
 		/* Ignore generic words that are often used as filler */
-		if (strcmp(dev_name, "none") != 0 && strcmp(dev_name, "nomountfs") != 0) {
+		if (strcmp(dev_name, "none") != 0 && strcmp(dev_name, "nomountfs") != 0 && strcmp(dev_name, "KSU") != 0 && strcmp(dev_name, "APatch") != 0 && strcmp(dev_name, "magisk") != 0 && strcmp(dev_name, "worker") != 0) {
 			path_to_mount = (char *)dev_name;
 		}
 	}
