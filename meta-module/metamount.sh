@@ -255,12 +255,16 @@ mount_partition() {
         return 0
     fi
 
-    mount -t nomountfs none "$DEST" \
+    mount -t nomountfs KSU "$DEST" \
         -o "upperdir=${MERGED},lowerdir=${DEST}" \
         2>>"$STATE_DIR/mount.log"
     local rc=$?
-
     if [ $rc -eq 0 ]; then
+        if [ -f /data/adb/ksu/bin/ksud ]; then
+            /data/adb/ksu/bin/ksud kernel umount del "$DEST"  >/dev/null 2>&1
+            /data/adb/ksu/bin/ksud kernel umount add "$DEST"  >/dev/null 2>&1
+            /data/adb/ksud kernel notify-module-mounted >/dev/null 2>&1
+        fi
         log "OK: $PART -> $DEST"
         record_mount "$DEST"
     else
