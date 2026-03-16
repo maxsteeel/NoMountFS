@@ -204,11 +204,13 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	}
 
 	/*
-	 * 3. For direct file injection (source= + target=), both must be present.
-	 * Do NOT set path_to_mount here — fill_super handles this case directly
-	 * via target_str in its own branch below. path_to_mount is only for the
-	 * lowerdir/union-mount path.
+	 * 3. For direct file injection (source= + target=), map source= into
+	 * path_to_mount so the target= branch at line ~257 can use it via
+	 * kern_path(path_to_mount, ...). Without this, path_to_mount stays NULL
+	 * and kern_path(NULL) panics.
 	 */
+	if (source_str && *source_str && !path_to_mount)
+		path_to_mount = source_str;
 
 	/* 4. Fallback: If there is no 'lowerdir', use the original dev_name */
 	if (!path_to_mount && dev_name && *dev_name) {
@@ -245,7 +247,8 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	if (target_str && *target_str) {
 		struct path target_path;
 		struct dentry *parent_dentry;
-
+		struct path parent_path;
+		
 		/* Resolve the target file path */
 		err = kern_path(target_str, LOOKUP_FOLLOW, &target_path);
 		if (err) {
@@ -273,8 +276,10 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		 * nomountfs being installed over the same directory.
 		 */
 		parent_dentry = dget_parent(target_path.dentry);
+		parent_path.dentry = parent_dentry;
+		parent_path.mnt = target_path.mnt;  // same mnt, parent dentry
 		sbi->lower_paths[0].dentry = parent_dentry;
-		sbi->lower_paths[0].mnt = nomount_clone_private_mount(&target_path);
+		sbi->lower_paths[0].mnt = nomount_clone_private_mount(&parent_path);
 		if (IS_ERR(sbi->lower_paths[0].mnt)) {
 			err = PTR_ERR(sbi->lower_paths[0].mnt);
 			sbi->lower_paths[0].mnt = NULL;
