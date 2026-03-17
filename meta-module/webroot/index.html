@@ -594,6 +594,7 @@ async function handleMountToggle(mod, card, btn) {
   btn.innerHTML = '<span class="spinner"></span>';
 
   const action = btn.dataset.action;
+  const META_DIR = '/data/adb/modules/meta-nomountfs';
 
   if (action === 'mount') {
     let allOk = true;
@@ -602,9 +603,15 @@ async function handleMountToggle(mod, card, btn) {
       const modDir = `${MODULES_DIR}/${mod.id}/${part}`;
       const merge  = `${MERGE_BASE}/${part}`;
 
+      // Copy module files to merge tree
       await exec(`mkdir -p ${merge} && cp -rf ${modDir}/. ${merge}/`);
-      const r = await exec(`mount -t nomountfs KSU ${tgt} -o upperdir=${merge},lowerdir=${tgt} 2>&1`);
+      
+      // Mount using nomountfs with overlay options
+      const r = await exec(`mount -t nomountfs none ${tgt} -o upperdir=${merge},lowerdir=${tgt} 2>&1`);
       if (r.errno !== 0) { allOk = false; }
+      
+      // Register mount point with kernel umount manager
+      await exec(`${META_DIR}/umounter.sh add ${tgt} 2>/dev/null; true`);
     }
 
     if (allOk) {
@@ -626,28 +633,35 @@ async function handleMountToggle(mod, card, btn) {
     }
 
   } else {
+    // Unmount: remove module files from merge tree, then remount or fully unmount
     for (const part of mod.parts) {
       const tgt    = PART_TARGET[part];
       const modDir = `${MODULES_DIR}/${mod.id}/${part}`;
       const merge  = `${MERGE_BASE}/${part}`;
 
-      await exec(`umount -l ${tgt} 2>/dev/null; true`);
-
-      // Remove only the files this module contributed to the merge tree
-      await sh(
-        `find ${modDir} \( -type f -o -type l \) 2>/dev/null | ` +
-        `while read F; do ` +
-        `  REL=$(echo "$F" | sed "s|^${modDir}||"); ` +
-        `  rm -f ${merge}$REL 2>/dev/null; ` +
-        `done`
+      // Remove this module's files from the merge tree
+      // Use a shell script that properly computes relative paths
+      await exec(
+        `MOD_DIR="${modDir}"; MERGE_DIR="${merge}"; ` +
+        `find "$MOD_DIR" \\( -type f -o -type l \\) 2>/dev/null | while read F; do ` +
+        `  REL="${F#$MOD_DIR}"; ` +
+        `  rm -f "$MERGE_DIR$REL" 2>/dev/null; ` +
+        `done; true`
       );
 
-      // Remount if the merge tree still has files from other modules
+      // Check if merge tree still has files from other modules
       const hasFiles = await sh(
         `[ -n "$(find ${merge} -type f 2>/dev/null | head -1)" ] && echo 1 || echo 0`
       );
+      
       if (hasFiles === '1') {
-        await exec(`mount -t nomountfs KSU ${tgt} -o upperdir=${merge},lowerdir=${tgt} 2>&1`);
+        // Other modules still active - remount with remaining files
+        await exec(`mount -t nomountfs none ${tgt} -o upperdir=${merge},lowerdir=${tgt} 2>&1`);
+      } else {
+        // No more modules - fully unmount the partition
+        await exec(`umount -l ${tgt} 2>/dev/null; true`);
+        // Remove from kernel umount manager
+        await exec(`${META_DIR}/umounter.sh del ${tgt} 2>/dev/null; true`);
       }
     }
 
