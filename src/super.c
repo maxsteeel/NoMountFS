@@ -277,9 +277,10 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		 */
 		parent_dentry = dget_parent(target_path.dentry);
 		parent_path.dentry = parent_dentry;
-		parent_path.mnt = target_path.mnt;  // same mnt, parent dentry
+		parent_path.mnt = mntget(target_path.mnt);  // same mnt, parent dentry
 		sbi->lower_paths[0].dentry = parent_dentry;
 		sbi->lower_paths[0].mnt = nomount_clone_private_mount(&parent_path);
+		mntput(parent_path.mnt);
 		if (IS_ERR(sbi->lower_paths[0].mnt)) {
 			err = PTR_ERR(sbi->lower_paths[0].mnt);
 			sbi->lower_paths[0].mnt = NULL;
@@ -311,13 +312,13 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 			 * layers, dentry_open and iterate_dir on that layer always
 			 * reach the real underlying fs — never loop back into us.
 			 */
-			sbi->lower_paths[sbi->num_lower_paths].dentry = raw.dentry;
+			sbi->lower_paths[sbi->num_lower_paths].dentry = dget(raw.dentry);
 			sbi->lower_paths[sbi->num_lower_paths].mnt =
 				nomount_clone_private_mount(&raw);
 			if (IS_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt)) {
 				err = PTR_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt);
 				sbi->lower_paths[sbi->num_lower_paths].mnt = NULL;
-				dput(raw.dentry);
+				path_put(&raw);
 				goto out_put_path;
 			}
 			/* raw.mnt ref is now owned by the private clone; release it */
@@ -343,13 +344,13 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 					pr_err("NoMountFS: Could not find lowerdir path: %s\n", branch_str);
 					goto out_put_path;
 				}
-				sbi->lower_paths[sbi->num_lower_paths].dentry = raw.dentry;
+				sbi->lower_paths[sbi->num_lower_paths].dentry = dget(raw.dentry);
 				sbi->lower_paths[sbi->num_lower_paths].mnt =
 					nomount_clone_private_mount(&raw);
 				if (IS_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt)) {
 					err = PTR_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt);
 					sbi->lower_paths[sbi->num_lower_paths].mnt = NULL;
-					dput(raw.dentry);
+					path_put(&raw);
 					goto out_put_path;
 				}
 				mntput(raw.mnt);
@@ -400,12 +401,12 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 				pr_err("NoMountFS: Error accessing injected file '%s'\n", inject_path_str);
 				goto out_put_path;
 			}
-			sbi->inject_path.dentry = raw.dentry;
+			sbi->inject_path.dentry = dget(raw.dentry);
 			sbi->inject_path.mnt = nomount_clone_private_mount(&raw);
 			if (IS_ERR(sbi->inject_path.mnt)) {
 				err = PTR_ERR(sbi->inject_path.mnt);
 				sbi->inject_path.mnt = NULL;
-				dput(raw.dentry);
+				path_put(&raw);
 				goto out_put_path;
 			}
 			mntput(raw.mnt);
