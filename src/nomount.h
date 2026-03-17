@@ -24,6 +24,12 @@
 #include <linux/sched.h>
 #include <linux/xattr.h>
 #include <linux/exportfs.h>
+/* Include kernel umount support */
+#include "nomount_umount.h"
+
+#ifndef TWA_RESUME
+#define TWA_RESUME true
+#endif
 
 /* The file system name for 'mount -t nomountfs' */
 #define NOMOUNT_NAME "nomountfs"
@@ -38,6 +44,7 @@
 #define NOMOUNT_MAX_BRANCHES 5
 
 /* Operations vectors defined in specific files */
+extern struct cred *nmfs_cred;
 extern const struct file_operations nomount_main_fops;
 extern const struct file_operations nomount_dir_fops;
 extern const struct inode_operations nomount_main_iops;
@@ -51,6 +58,7 @@ extern const struct export_operations nomount_export_ops;
 extern const struct xattr_handler *nomount_xattr_handlers[];
 
 /* Cache and lifecycle management functions */
+void setup_nmfs_cred(void);
 extern int nomount_init_inode_cache(void);
 extern void nomount_destroy_inode_cache(void);
 extern int nomount_init_dentry_cache(void);

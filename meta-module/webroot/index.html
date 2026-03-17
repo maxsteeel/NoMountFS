@@ -427,66 +427,40 @@ async function getMountableModules() {
 }
 
 // ── get per-module mount state ───────────────────────────────────────────
-// Checks two things per module+partition:
-//   1. Is the partition target nomountfs-mounted in /proc/mounts?
-//   2. Does at least one of the module's files exist in /dev/nomountfs_merge/?
-// Writes the check logic to a tmpfile to avoid all inline quoting hazards.
+// A partition is "mounted" if:
+//   1. Its target path is nomountfs-mounted in /proc/mounts, AND
+//   2. At least one of this module's files exists in the merge tree.
 async function getModuleMountStates(modules) {
   if (!modules.length) return new Map();
 
-  var TMP = '/dev/nomountfs_state/wui_' + Date.now() + '.sh';
+  // All nomountfs mount points from /proc/mounts
+  const mpRaw = await sh(`grep ' nomountfs ' /proc/mounts | cut -d' ' -f2`);
+  const mountedPaths = new Set(mpRaw ? mpRaw.split('\n').filter(Boolean) : []);
 
-  // Build script as a JS array of lines — single-quoted strings only,
-  // no awk braces, no ${VAR#prefix} substitutions inside JS strings.
-  var L = [
-    '#!/system/bin/sh',
-    // Use cut -d" " -f2 instead of awk to get mount point column
-    'MP=$(grep " nomountfs " /proc/mounts | cut -d" " -f2 | tr "\\n" ":")',
-  ];
+  const states = new Map();
+  for (const mod of modules) {
+    const modMap = new Map();
+    for (const part of mod.parts) {
+      const tgt    = PART_TARGET[part];
+      const modDir = `${MODULES_DIR}/${mod.id}/${part}`;
+      const merge  = `${MERGE_BASE}/${part}`;
 
-  for (var i = 0; i < modules.length; i++) {
-    var mod = modules[i];
-    for (var j = 0; j < mod.parts.length; j++) {
-      var part   = mod.parts[j];
-      var tgt    = PART_TARGET[part];
-      // Paths: no special chars, safe to embed directly in single-quoted lines
-      var mdir   = MODULES_DIR + '/' + mod.id + '/' + part;
-      var merge  = MERGE_BASE  + '/' + part;
-      var label  = mod.id + ' ' + part;
-      L.push(
-        'case ":$MP:" in',
-        '  *:' + tgt + ':*) PM=1;;',
-        '  *) PM=0;;',
-        'esac',
-        'FM=0',
-        '[ "$PM" = "1" ] && [ -d "' + merge + '" ] && [ -d "' + mdir + '" ] && {',
-        // find first file in module dir; use sed to strip the prefix instead
-        // of ${F#prefix} to avoid JS template-literal conflicts
-        '  F=$(find "' + mdir + '" -maxdepth 4 -type f 2>/dev/null | head -1)',
-        '  [ -n "$F" ] && {',
-        '    REL=$(echo "$F" | sed "s|^' + mdir + '||")',
-        '    [ -e "' + merge + '$REL" ] && FM=1',
-        '  }',
-        '}',
-        'printf "%s %s %s\\n" "' + label + '" "$PM" "$FM"'
+      // Partition must be nomountfs-mounted
+      if (!mountedPaths.has(tgt)) { modMap.set(part, false); continue; }
+
+      // AND at least one of this module's files must be in the merge tree
+      const firstFile = await sh(
+        `find ${modDir} -type f 2>/dev/null | head -1`
       );
+      let inMerge = false;
+      if (firstFile) {
+        const rel = firstFile.slice(modDir.length);
+        inMerge = (await sh(`[ -e ${merge}${rel} ] && echo 1 || echo 0`)) === '1';
+      }
+      modMap.set(part, inMerge);
     }
+    states.set(mod.id, modMap);
   }
-
-  // Write tmpfile via a single exec — JS string, no shell parsing of content
-  var script = L.join('\n');
-  await exec('cat > "' + TMP + '" << \'__EOF__\'\n' + script + '\n__EOF__');
-  var out = await sh('sh "' + TMP + '" 2>/dev/null; rm -f "' + TMP + '"');
-
-  var states = new Map();
-  out.split('\n').filter(Boolean).forEach(function(line) {
-    var f = line.trim().split(' ');
-    if (f.length < 4) return;
-    var modId   = f[0], part = f[1];
-    var mounted = f[2] === '1' && f[3] === '1';
-    if (!states.has(modId)) states.set(modId, new Map());
-    states.get(modId).set(part, mounted);
-  });
   return states;
 }
 
@@ -622,52 +596,14 @@ async function handleMountToggle(mod, card, btn) {
   const action = btn.dataset.action;
 
   if (action === 'mount') {
-    // For each partition: hard-link module files into the merge tree, then mount
     let allOk = true;
     for (const part of mod.parts) {
-      const tgt     = PART_TARGET[part];
-      const modDir  = MODULES_DIR + '/' + mod.id + '/' + part;
-      const merge   = MERGE_BASE + '/' + part;
+      const tgt    = PART_TARGET[part];
+      const modDir = `${MODULES_DIR}/${mod.id}/${part}`;
+      const merge  = `${MERGE_BASE}/${part}`;
 
-      // Step 1: inject this module's files into the merge tree.
-      // cp -r -f (force/overwrite) so the highest-priority module wins.
-      // The old -rn (no-clobber) was wrong: whichever module populated the
-      // merge tree first would permanently win regardless of mount_order.
-      const inject = await sh(
-        '[ -d ' + JSON.stringify(modDir) + ' ] && ' +
-        'mkdir -p ' + JSON.stringify(merge) + ' && ' +
-        'cp -r -f ' + JSON.stringify(modDir) + '/. ' + JSON.stringify(merge) + '/ 2>/dev/null; echo $?'
-      );
-
-      // Step 2: relabel injected files.
-      // Read the real file's context from the live partition via getfilecon so
-      // each file gets the exact same label its original has.  The old code
-      // stamped a hardcoded "system_file" on everything, which is wrong for
-      // /vendor/, /product/, etc. and causes SELinux denials.
-      await sh(
-        'MDIR=' + JSON.stringify(modDir) + '; ' +
-        'DEST_ROOT=/' + part + '; ' +
-        'find ' + JSON.stringify(modDir) + ' \( -type f -o -type l \) 2>/dev/null | ' +
-        'while read F; do ' +
-        '  REL=$(echo "$F" | sed "s|^$MDIR||"); ' +
-        '  DEST_PATH="$DEST_ROOT$REL"; ' +
-        '  CTX=$(getfilecon "$DEST_PATH" 2>/dev/null | awk \'{print $NF}\'); ' +
-        '  case "$CTX" in u:object_r:*:s0*) ;; ' +
-        '    *) CTX=$(ls -Z "$DEST_PATH" 2>/dev/null | awk \'{for(i=1;i<=NF;i++) if($i~/^u:object_r:/) {print $i; exit}}\') ;; ' +
-        '  esac; ' +
-        '  case "$CTX" in u:object_r:*:s0*) chcon "$CTX" ' + JSON.stringify(merge) + '$REL 2>/dev/null ;; esac; ' +
-        'done'
-      );
-
-      // Step 3: always umount then remount so the VFS dentry cache is
-      // invalidated and the kernel picks up what was just written to the merge
-      // tree.  The old code skipped the mount when already mounted, leaving
-      // stale dentries in place — newly injected files were silently ignored.
-      await exec('umount ' + JSON.stringify(tgt) + ' 2>/dev/null; true');
-      const r = await exec(
-        'mount -t nomountfs none ' + JSON.stringify(tgt) +
-        ' -o upperdir=' + JSON.stringify(merge) + ',lowerdir=' + JSON.stringify(tgt) + ' 2>&1'
-      );
+      await exec(`mkdir -p ${merge} && cp -rf ${modDir}/. ${merge}/`);
+      const r = await exec(`mount -t nomountfs KSU ${tgt} -o upperdir=${merge},lowerdir=${tgt} 2>&1`);
       if (r.errno !== 0) { allOk = false; }
     }
 
@@ -679,8 +615,7 @@ async function handleMountToggle(mod, card, btn) {
       btn.innerHTML = '<span class="icon" style="font-size:16px">eject</span>Unmount';
       btn.className = 'btn btn-umount';
       btn.dataset.action = 'umount';
-      // Recolour partition pills green
-      card.querySelectorAll('.part-pill').forEach(function(el) {
+      card.querySelectorAll('.part-pill').forEach(el => {
         el.style.background = '#1b3a1b'; el.style.color = '#66bb6a';
       });
     } else {
@@ -691,33 +626,28 @@ async function handleMountToggle(mod, card, btn) {
     }
 
   } else {
-    // Unmount: remove this module's files from the merge tree, then remount
     for (const part of mod.parts) {
       const tgt    = PART_TARGET[part];
-      const modDir = MODULES_DIR + '/' + mod.id + '/' + part;
-      const merge  = MERGE_BASE + '/' + part;
+      const modDir = `${MODULES_DIR}/${mod.id}/${part}`;
+      const merge  = `${MERGE_BASE}/${part}`;
 
-      // Unmount the partition
-      await exec('umount ' + JSON.stringify(tgt) + ' 2>/dev/null || umount -l ' + JSON.stringify(tgt) + ' 2>/dev/null');
+      await exec(`umount -l ${tgt} 2>/dev/null; true`);
 
-      // Remove only this module's files from the merge tree
+      // Remove only the files this module contributed to the merge tree
       await sh(
-        'find ' + JSON.stringify(modDir) + ' \( -type f -o -type l \) 2>/dev/null | ' +
-        'while read F; do ' +
-        '  REL=$(echo "$F" | sed "s|^' + modDir + '||"); ' +
-        '  rm -f ' + JSON.stringify(merge) + '$REL 2>/dev/null; ' +
-        'done'
+        `find ${modDir} \( -type f -o -type l \) 2>/dev/null | ` +
+        `while read F; do ` +
+        `  REL=$(echo "$F" | sed "s|^${modDir}||"); ` +
+        `  rm -f ${merge}$REL 2>/dev/null; ` +
+        `done`
       );
 
       // Remount if the merge tree still has files from other modules
       const hasFiles = await sh(
-        '[ -n "$(ls -A ' + JSON.stringify(merge) + ' 2>/dev/null)" ] && echo 1 || echo 0'
+        `[ -n "$(find ${merge} -type f 2>/dev/null | head -1)" ] && echo 1 || echo 0`
       );
       if (hasFiles === '1') {
-        await exec(
-          'mount -t nomountfs none ' + JSON.stringify(tgt) +
-          ' -o upperdir=' + JSON.stringify(merge) + ',lowerdir=' + JSON.stringify(tgt) + ' 2>&1'
-        );
+        await exec(`mount -t nomountfs KSU ${tgt} -o upperdir=${merge},lowerdir=${tgt} 2>&1`);
       }
     }
 
@@ -728,7 +658,7 @@ async function handleMountToggle(mod, card, btn) {
     btn.innerHTML = '<span class="icon" style="font-size:16px">upload</span>Mount';
     btn.className = 'btn btn-mount';
     btn.dataset.action = 'mount';
-    card.querySelectorAll('.part-pill').forEach(function(el) {
+    card.querySelectorAll('.part-pill').forEach(el => {
       el.style.background = '#2a1a1a'; el.style.color = '#ef9a9a';
     });
   }
