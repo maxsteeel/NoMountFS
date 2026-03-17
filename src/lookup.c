@@ -125,6 +125,11 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 	bool is_dir = false;
 
 	parent = dget_parent(dentry);
+	/* Guard: parent must exist — dentry should always have a parent */
+	if (!parent) {
+		pr_err("NoMountFS: lookup failed - no parent for dentry\n");
+		return ERR_PTR(-ENOENT);
+	}
 	num_lower_parent_paths = nomount_get_all_lower_paths(parent, lower_parent_paths);
 
 	/* Allocate private data for the dentry info */
@@ -168,7 +173,13 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 			 */
 			lower_path.dentry = lower_dentry;
 			lower_path.mnt = mntget(lower_parent_paths[i].mnt);
-			follow_down(&lower_path);
+			err = follow_down(&lower_path);
+			if (err < 0) {
+				/* follow_down failed — clean up and continue to next layer */
+				path_put(&lower_path);
+				dput(lower_dentry);
+				continue;
+			}
 			lower_dentry = lower_path.dentry;
 			/* lower_path.mnt may have changed — use it for found_paths */
 
@@ -236,7 +247,8 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 	if (d_inode(dentry))
 		fsstack_copy_attr_times(d_inode(dentry), nomount_lower_inode(d_inode(dentry)));
 
-	fsstack_copy_attr_atime(d_inode(parent), nomount_lower_inode(d_inode(parent)));
+	if (d_inode(parent))
+		fsstack_copy_attr_atime(d_inode(parent), nomount_lower_inode(d_inode(parent)));
 
 out_put_parent:
 	nomount_put_all_lower_paths(parent, lower_parent_paths, num_lower_parent_paths);
