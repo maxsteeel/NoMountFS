@@ -57,6 +57,10 @@ static int nomount_open(struct inode *inode, struct file *file)
 		}
 		kfree(info);
 		return err;
+	} else if (info->num_lower_files == 0) {
+		/* No files were opened — this is an error */
+		kfree(info);
+		return -ENOENT;
 	} else {
 		file->private_data = info;
 		fsstack_copy_attr_all(inode, nomount_lower_inode(inode));

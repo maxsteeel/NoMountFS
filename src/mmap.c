@@ -38,7 +38,11 @@ static int nomount_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	lower_vm_ops = NOMOUNT_F(file)->lower_vm_ops;
 	lower_file = nomount_lower_file(file);
 
-	BUG_ON(!lower_vm_ops);
+	/* Guard: if no lower vm_ops, we cannot forward the fault */
+	if (!lower_vm_ops || !lower_vm_ops->fault) {
+		pr_err_ratelimited("NoMountFS: fault called without lower_vm_ops\n");
+		return VM_FAULT_SIGBUS;
+	}
 
 	/* Switch file to the real underlying object */
 	lower_vma.vm_file = lower_file;
@@ -134,16 +138,17 @@ int nomount_mmap(struct file *file, struct vm_area_struct *vma)
 	err = lower_file->f_op->mmap(lower_file, vma);
 	vma->vm_file = file;
 
-	if (err) 
+	if (err)
 		return err;
 
-	/* Save original operations only the first time */
-	if (!NOMOUNT_F(file)->lower_vm_ops)
+	/* Save original operations only if they exist */
+	if (vma->vm_ops)
 		NOMOUNT_F(file)->lower_vm_ops = vma->vm_ops;
 
-	/* 2. Setup our stacked operations */
-	vma->vm_ops = &nomount_vm_ops;
-	
+	/* 2. Setup our stacked operations only if we have lower vm_ops */
+	if (NOMOUNT_F(file)->lower_vm_ops)
+		vma->vm_ops = &nomount_vm_ops;
+
 	/* 3. Link address space operations */
 	file->f_mapping->a_ops = &nomount_aops;
 

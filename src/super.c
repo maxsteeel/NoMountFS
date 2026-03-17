@@ -423,7 +423,19 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	 * correctly for system_file labels. Using the module dir's sb here would
 	 * pass the wrong sb type to security_sb_clone_mnt_opts and could BUG().
 	 */
+	if (sbi->num_lower_paths == 0) {
+		pr_err("NoMountFS: No lower paths configured — cannot initialize superblock\n");
+		err = -EINVAL;
+		goto out_put_inject;
+	}
+
 	sbi->lower_sb = sbi->lower_paths[sbi->num_lower_paths - 1].dentry->d_sb;
+	if (!sbi->lower_sb) {
+		pr_err("NoMountFS: Lower superblock is NULL — cannot proceed\n");
+		err = -EINVAL;
+		goto out_put_inject;
+	}
+
 	sb->s_op = &nomount_sops;
 	sb->s_d_op = &nomount_dops;
 	sb->s_export_op = &nomount_export_ops;
@@ -477,6 +489,7 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	root_inode = nomount_iget(sb, d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry));
 	if (IS_ERR(root_inode)) {
 		err = PTR_ERR(root_inode);
+		pr_err("NoMountFS: Failed to get root inode: %d\n", err);
 		goto out_put_inject;
 	}
 
@@ -485,14 +498,16 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	if (!root) {
 		pr_err("NoMountFS: Failed to create root dentry\n");
 		err = -ENOMEM;
+		/* d_make_root frees the inode on failure */
 		goto out_put_inject;
 	}
 
 	/* Setup root private data */
 	err = new_dentry_private_data(root);
 	if (err) {
+		pr_err("NoMountFS: Failed to allocate root private data: %d\n", err);
 		dput(root);
-		goto out_put_inject; /* d_make_root handles inode on failure if dput handles failure*/
+		goto out_put_inject;
 	}
 
 	nomount_set_lower_paths(root, sbi->lower_paths, sbi->num_lower_paths);
