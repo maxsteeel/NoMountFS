@@ -31,6 +31,112 @@ initialize_variables() {
     else
         SELINUX_HOOKS=""
     fi
+
+    # Resolve kernel/sys.c path
+    if [ -f "$GKI_ROOT/common/kernel/sys.c" ]; then
+        KERNEL_SYS="$GKI_ROOT/common/kernel/sys.c"
+    elif [ -f "$GKI_ROOT/kernel/sys.c" ]; then
+        KERNEL_SYS="$GKI_ROOT/kernel/sys.c"
+    else
+        KERNEL_SYS=""
+    fi
+}
+
+patch_kernel_sys_c() {
+    if [ -z "$KERNEL_SYS" ]; then
+        echo "[!] kernel/sys.c not found, skipping setresuid patch."
+        return
+    fi
+
+    if grep -q 'nmfs_handle_setresuid' "$KERNEL_SYS"; then
+        echo "[-] kernel/sys.c already patched, skipping."
+        return
+    fi
+
+    # Create temporary files for the code blocks
+    EXTERN_TMP=$(mktemp)
+    CALL_TMP=$(mktemp)
+
+    cat > "$EXTERN_TMP" << 'EXTERN_EOF'
+#ifdef CONFIG_NOMOUNT_FS
+extern int nmfs_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
+#endif
+EXTERN_EOF
+
+    cat > "$CALL_TMP" << 'CALL_EOF'
+#ifdef CONFIG_NOMOUNT_FS
+    if (nmfs_handle_setresuid(ruid, euid, suid)) {
+        pr_err("nomount: Something wrong with nmfs_handle_setresuid()\n");
+    }
+#endif
+CALL_EOF
+
+    # Find function line
+    FUNC_LINE=$(grep -n "SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)" "$KERNEL_SYS" | head -n 1 | cut -d: -f1)
+
+    if [ -z "$FUNC_LINE" ]; then
+        echo "[!] Could not locate SYSCALL_DEFINE3(setresuid) function, skipping patch."
+        rm -f "$EXTERN_TMP" "$CALL_TMP"
+        return
+    fi
+
+    # Insert extern block before the function line
+    head -n $((FUNC_LINE - 1)) "$KERNEL_SYS" > "${KERNEL_SYS}.tmp"
+    cat "$EXTERN_TMP" >> "${KERNEL_SYS}.tmp"
+    tail -n +"$FUNC_LINE" "$KERNEL_SYS" >> "${KERNEL_SYS}.tmp"
+    mv "${KERNEL_SYS}.tmp" "$KERNEL_SYS"
+
+    # Recalculate FUNC_LINE since file changed
+    FUNC_LINE=$(grep -n "SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)" "$KERNEL_SYS" | head -n 1 | cut -d: -f1)
+
+    # Find opening brace after function definition
+    OPEN_BRACE_LINE=$(tail -n +"$FUNC_LINE" "$KERNEL_SYS" | grep -n "^{" | head -n 1 | cut -d: -f1)
+
+    if [ -z "$OPEN_BRACE_LINE" ]; then
+        echo "[!] Could not locate opening brace for setresuid, reverting."
+        rm -f "$EXTERN_TMP" "$CALL_TMP"
+        return
+    fi
+
+    ABS_BRACE_LINE=$((FUNC_LINE + OPEN_BRACE_LINE - 1))
+
+    # Insert call block after the opening brace
+    head -n "$ABS_BRACE_LINE" "$KERNEL_SYS" > "${KERNEL_SYS}.tmp"
+    cat "$CALL_TMP" >> "${KERNEL_SYS}.tmp"
+    tail -n +"$((ABS_BRACE_LINE + 1))" "$KERNEL_SYS" >> "${KERNEL_SYS}.tmp"
+    mv "${KERNEL_SYS}.tmp" "$KERNEL_SYS"
+
+    # Cleanup temp files
+    rm -f "$EXTERN_TMP" "$CALL_TMP"
+
+    # Remove #include <linux/nospec.h> if present
+    sed -i '/#include <linux\/nospec.h>/d' "$KERNEL_SYS"
+
+    echo "[+] Patched kernel/sys.c (setresuid hook)"
+}
+
+unpatch_kernel_sys_c() {
+    if [ -z "$KERNEL_SYS" ]; then
+        return
+    fi
+
+    if ! grep -q 'nmfs_handle_setresuid' "$KERNEL_SYS"; then
+        return
+    fi
+
+    # Create backup before unpatching
+    cp "$KERNEL_SYS" "${KERNEL_SYS}.nomount_backup"
+
+    # Remove the extern declaration block
+    sed -i '/#ifdef CONFIG_NOMOUNT_FS/,/#endif/{/nmfs_handle_setresuid/d}' "$KERNEL_SYS"
+    sed -i '/^#ifdef CONFIG_NOMOUNT_FS$/d' "$KERNEL_SYS"
+    sed -i '/^#endif$/d' "$KERNEL_SYS"
+
+    # Remove the function call block (more aggressive removal)
+    sed -i '/nmfs_handle_setresuid/d' "$KERNEL_SYS"
+    sed -i '/nomount: Something wrong with nmfs_handle_setresuid/d' "$KERNEL_SYS"
+
+    echo "[-] kernel/sys.c patch reverted (backup at ${KERNEL_SYS}.nomount_backup)"
 }
 
 patch_selinux_hooks() {
@@ -55,7 +161,7 @@ patch_selinux_hooks() {
     sed -i "${INSERT_BEFORE}i\\
 #ifdef CONFIG_NOMOUNT_FS\\
 \t/* NoMountFS inherits labels directly from lower inodes via\\
-\t * security_inode_notifysecctx \xe2\x80\x94 use NATIVE behavior so\\
+\t * security_inode_notifysecctx — use NATIVE behavior so\\
 \t * SBLABEL_MNT is set and notifysecctx can set LABEL_INITIALIZED.\\
 \t */\\
 \tif (!strcmp(sb->s_type->name, \"nomountfs\"))\\
@@ -147,8 +253,8 @@ perform_cleanup() {
     fi
 
     unpatch_selinux_hooks
-
     unpatch_selinux_hooks_copy_sid
+    unpatch_kernel_sys_c
 
     if [ -d "$GKI_ROOT/$REPO" ]; then
         echo "[?] Do you want to delete the repository directory $REPO? (y/n)"
@@ -190,8 +296,8 @@ setup_nomountfs() {
     fi
 
     patch_selinux_hooks
-
     patch_selinux_hooks_copy_sid
+    patch_kernel_sys_c
 
     echo '[+] NoMountFS is ready to be compiled!'
     echo '[+] Run: make menuconfig and look for NoMountFS under File Systems'
