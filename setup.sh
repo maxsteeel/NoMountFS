@@ -109,9 +109,6 @@ CALL_EOF
     # Cleanup temp files
     rm -f "$EXTERN_TMP" "$CALL_TMP"
 
-    # Remove #include <linux/nospec.h> if present
-    sed -i '/#include <linux\/nospec.h>/d' "$KERNEL_SYS"
-
     echo "[+] Patched kernel/sys.c (setresuid hook)"
 }
 
@@ -121,22 +118,66 @@ unpatch_kernel_sys_c() {
     fi
 
     if ! grep -q 'nmfs_handle_setresuid' "$KERNEL_SYS"; then
+        echo "[-] kernel/sys.c: NoMountFS hook not found, skipping unpatch."
         return
     fi
 
-    # Create backup before unpatching
-    cp "$KERNEL_SYS" "${KERNEL_SYS}.nomount_backup"
+    echo "[-] Reverting kernel/sys.c patch..."
 
-    # Remove the extern declaration block
-    sed -i '/#ifdef CONFIG_NOMOUNT_FS/,/#endif/{/nmfs_handle_setresuid/d}' "$KERNEL_SYS"
-    sed -i '/^#ifdef CONFIG_NOMOUNT_FS$/d' "$KERNEL_SYS"
-    sed -i '/^#endif$/d' "$KERNEL_SYS"
+    # Use awk to precisely remove only the NoMountFS blocks related to nmfs_handle_setresuid
+    awk '
+    BEGIN { skip = 0; in_nmfs_block = 0; brace_count = 0 }
+    
+    # Detect start of our specific extern block
+    /^#ifdef CONFIG_NOMOUNT_FS$/ {
+        if ((getline nextline) > 0) {
+            if (nextline ~ /nmfs_handle_setresuid/) {
+                skip = 1
+                next
+            } else {
+                print
+                print nextline
+            }
+        }
+        next
+    }
+    
+    # Skip lines until matching #endif for our block
+    skip == 1 && /^#endif$/ {
+        skip = 0
+        next
+    }
+    
+    # Skip lines in our block
+    skip == 1 { next }
+    
+    # Detect function call block (inside SYSCALL_DEFINE3)
+    /if \(nmfs_handle_setresuid\(/ {
+        in_nmfs_block = 1
+        brace_count = 1
+        next
+    }
+    
+    # Track braces and skip until block ends
+    in_nmfs_block == 1 {
+        brace_count += gsub(/{/, "{")
+        brace_count -= gsub(/}/, "}")
+        if (brace_count <= 0) {
+            in_nmfs_block = 0
+        }
+        next
+    }
+    
+    # Also remove the pr_err line if it exists standalone
+    /nomount: Something wrong with nmfs_handle_setresuid/ { next }
+    
+    # Print all other lines
+    { print }
+    ' "$KERNEL_SYS" > "${KERNEL_SYS}.tmp"
+    
+    mv "${KERNEL_SYS}.tmp" "$KERNEL_SYS"
 
-    # Remove the function call block (more aggressive removal)
-    sed -i '/nmfs_handle_setresuid/d' "$KERNEL_SYS"
-    sed -i '/nomount: Something wrong with nmfs_handle_setresuid/d' "$KERNEL_SYS"
-
-    echo "[-] kernel/sys.c patch reverted (backup at ${KERNEL_SYS}.nomount_backup)"
+    echo "[-] kernel/sys.c patch reverted."
 }
 
 patch_selinux_hooks() {
@@ -178,12 +219,32 @@ unpatch_selinux_hooks() {
     fi
 
     if ! grep -q 'CONFIG_NOMOUNT_FS' "$SELINUX_HOOKS"; then
+        echo "[-] SELinux hooks.c: NoMountFS patch not found, skipping unpatch."
         return
     fi
 
-    # Remove the ifdef block and the trailing blank line after #endif
-    sed -i '/#ifdef CONFIG_NOMOUNT_FS/,/#endif/{N;/^#endif\n$/d;d}' "$SELINUX_HOOKS" 2>/dev/null || \
-    sed -i '/#ifdef CONFIG_NOMOUNT_FS/,/#endif/d' "$SELINUX_HOOKS"
+    echo "[-] Reverting SELinux hooks.c patch..."
+
+    # Use awk to precisely remove only NoMountFS blocks
+    awk '
+    BEGIN { skip = 0 }
+    
+    /^#ifdef CONFIG_NOMOUNT_FS$/ {
+        skip = 1
+        next
+    }
+    
+    skip == 1 && /^#endif$/ {
+        skip = 0
+        next
+    }
+    
+    skip == 1 { next }
+    
+    { print }
+    ' "$SELINUX_HOOKS" > "${SELINUX_HOOKS}.tmp"
+    
+    mv "${SELINUX_HOOKS}.tmp" "$SELINUX_HOOKS"
 
     echo "[-] SELinux hooks.c patch reverted."
 }
@@ -229,15 +290,40 @@ unpatch_selinux_hooks_copy_sid() {
     fi
 
     if ! grep -q 'selinux_sb_copy_sid_from' "$SELINUX_HOOKS"; then
+        echo "[-] SELinux hooks.c: copy_sid patch not found, skipping unpatch."
         return
     fi
 
-    sed -i '/^#ifdef CONFIG_NOMOUNT_FS$/{
-        N;/selinux_sb_copy_sid_from/!{P;D}
-        :loop
-        N;/^#endif/!b loop
-        N;d
-    }' "$SELINUX_HOOKS"
+    echo "[-] Reverting SELinux hooks.c copy_sid patch..."
+
+    # Use awk to remove only the selinux_sb_copy_sid_from block
+    awk '
+    BEGIN { skip = 0 }
+    
+    /^#ifdef CONFIG_NOMOUNT_FS$/ {
+        if ((getline nextline) > 0) {
+            if (nextline ~ /selinux_sb_copy_sid_from/) {
+                skip = 1
+                next
+            } else {
+                print
+                print nextline
+            }
+        }
+        next
+    }
+    
+    skip == 1 && /^#endif$/ {
+        skip = 0
+        next
+    }
+    
+    skip == 1 { next }
+    
+    { print }
+    ' "$SELINUX_HOOKS" > "${SELINUX_HOOKS}.tmp"
+    
+    mv "${SELINUX_HOOKS}.tmp" "$SELINUX_HOOKS"
 
     echo "[-] SELinux hooks.c copy_sid patch reverted."
 }
