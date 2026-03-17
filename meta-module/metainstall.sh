@@ -8,8 +8,11 @@ META_DIR="/data/adb/modules/meta-nomountfs"
 ORDER_FILE="$META_DIR/mount_order"
 
 # Derive the module ID being installed from its path.
-INSTALL_ID="${MODPATH##*/}"
-
+if [[ -z "$MODPATH" ]]; then
+    MODPATH=$(find /data/adb/modules_update -maxdepth 1 -type d -exec test -f "{}/module.prop" \; -print | head -n1)
+fi
+tmp=${MODPATH%/}
+INSTALL_ID="${tmp##*/}"
 ui_print "- [meta-nomountfs] Validating NoMountFS environment..."
 
 # Check 1: nomountfs filesystem registered with the kernel VFS.

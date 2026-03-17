@@ -2,3 +2,34 @@ config NOMOUNT_FS
 	tristate "NoMountFS filesystem support"
 	help
 	  A stackable filesystem for Android content redirection.
+
+config NOMOUNT_FS_KERNEL_UMOUNT
+	bool "NoMountFS kernel-level umount support"
+	depends on NOMOUNT_FS
+	default y
+	help
+	  Enable kernel-level automatic umount support for NoMountFS.
+	  This allows NoMountFS to automatically unmount paths for app
+	  processes without depending on KernelSU or other external
+	  modules.
+
+	  This feature hooks into the kernel's setuid/setresuid syscalls
+	  to trigger umount operations when zygote forks app processes.
+
+config NOMOUNT_FS_PROC
+	bool "NoMountFS procfs interface for umount management"
+	depends on NOMOUNT_FS_KERNEL_UMOUNT
+	default y
+	help
+	  Enable procfs interface (/proc/nomountfs/) for managing the
+	  kernel umount list from userspace.
+
+	  This creates the following proc entries:
+	  - /proc/nomountfs/umount_list   - List all umount paths
+	  - /proc/nomountfs/umount_add    - Add a path to umount list
+	  - /proc/nomountfs/umount_del    - Remove a path from umount list
+	  - /proc/nomountfs/umount_clear  - Clear all umount paths
+	  - /proc/nomountfs/umount_enabled - Enable/disable umount
+
+	  If disabled, you can still manage the umount list via kernel
+	  hooks or module parameters, but not from userspace at runtime.

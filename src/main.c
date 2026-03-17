@@ -41,11 +41,19 @@ static int __init init_nomount_fs(void)
 	int err;
 
 	pr_info("NoMountFS: Registering filesystem...\n");
+	nmfs_cred = prepare_creds();
+    if (!nmfs_cred) {
+        pr_err("nomount: prepare cred failed!\n");
+    }
+	setup_nmfs_cred();
+
+	/* Initialize the kernel umount subsystem */
+	nomount_kernel_umount_init();
 
 	/* Initialize the memory cache for our inodes */
 	err = nomount_init_inode_cache();
 	if (err)
-		goto out;
+		goto out_umount_exit;
 
 	/* Initialize the memory cache for our dentries */
 	err = nomount_init_dentry_cache();
@@ -64,16 +72,21 @@ out_free_dentry_cache:
 	nomount_destroy_dentry_cache();
 out_free_inode_cache:
 	nomount_destroy_inode_cache();
-out:
+out_umount_exit:
+	nomount_kernel_umount_exit();
+
 	return err;
 }
 
 static void __exit exit_nomount_fs(void)
 {
 	pr_info("NoMountFS: Unregistering filesystem...\n");
+	if (nmfs_cred)
+		put_cred(nmfs_cred);
 	unregister_filesystem(&nomount_fs_type);
 	nomount_destroy_dentry_cache();
 	nomount_destroy_inode_cache();
+	nomount_kernel_umount_exit();
 }
 
 MODULE_AUTHOR("Erez Zadok (WrapFS), maxsteeel (NoMountFS)");
