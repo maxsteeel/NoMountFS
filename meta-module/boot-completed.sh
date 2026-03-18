@@ -38,8 +38,6 @@ while IFS= read -r MOUNT_POINT || [ -n "$MOUNT_POINT" ]; do
     [ -z "$MOUNT_POINT" ] && continue
     
     log "Registering: $MOUNT_POINT"
-    umount -l $MOUNT_POINT
-    mount -t nomountfs none $MOUNT_POINT -o upperdir="/dev/nomountfs_merge${MOUNT_POINT}",lowerdir=$MOUNT_POINT
     "$META_DIR/umounter.sh" add "$MOUNT_POINT" 2>>"$STATE_DIR/boot.log"
 done < "$PENDING_FILE"
 
