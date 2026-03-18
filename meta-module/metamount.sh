@@ -258,7 +258,7 @@ mount_partition() {
     mount -t nomountfs none "$DEST" \
         -o "upperdir=${MERGED},lowerdir=${DEST}" \
         2>>"$STATE_DIR/mount.log"
-    ./umounter.sh add $DEST 2>>"$STATE_DIR/umount.log"
+    ${MODDIR}/umounter.sh add $DEST 2>>"$STATE_DIR/umount.log"
     local rc=$?
     if [ $rc -eq 0 ]; then
         log "OK: $PART -> $DEST"

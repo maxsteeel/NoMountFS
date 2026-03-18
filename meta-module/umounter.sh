@@ -53,9 +53,10 @@ cmd_add() {
 
     # Add to persistent list
     mkdir -p "$(dirname "$NOMOUNT_UMOUNT_LIST")"
-    echo "$path" >> "$NOMOUNT_UMOUNT_LIST"
-    log "Added to umount list: $path"
-
+    if ! grep -qxF "$path" "$NOMOUNT_UMOUNT_LIST" 2>/dev/null; then
+        echo "$path" >> "$NOMOUNT_UMOUNT_LIST"
+        log "Added to umount list: $path"
+    fi
     # Also try to add via kernel interface if available
     if [ -f "$NOMOUNT_PROC/umount_add" ]; then
         echo "$path" > "$NOMOUNT_PROC/umount_add" 2>/dev/null || true

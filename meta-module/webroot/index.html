@@ -614,7 +614,7 @@ async function handleMountToggle(mod, card, btn) {
       await exec(`mkdir -p ${merge} && cp -rf ${modDir}/. ${merge}/`);
 
       // Mount using nomountfs with overlay options
-      const r = await exec(`mount -t nomountfs none ${tgt} -o upperdir=${merge},lowerdir=${tgt} 2>&1`);
+      const r = await exec(`mount -t nomountfs none ${tgt} -o upperdir=${merge},lowerdir=${tgt} 2>>/dev/nomountfs_state/mount.log`);
       if (r.errno !== 0) { allOk = false; }
 
       // Register mount point with kernel umount manager
@@ -664,7 +664,7 @@ async function handleMountToggle(mod, card, btn) {
       if (hasFiles === '1') {
         // Other modules still active - unmount first, then remount with remaining files
         await exec(`umount ${tgt} 2>/dev/null || umount -l ${tgt} 2>/dev/null; true`);
-        await exec(`mount -t nomountfs none ${tgt} -o upperdir=${merge},lowerdir=${tgt} 2>&1`);
+        await exec(`mount -t nomountfs none ${tgt} -o upperdir=${merge},lowerdir=${tgt} 2>>/dev/nomountfs_state/mount.log`);
       } else {
         // No more modules - fully unmount the partition
         // Try regular umount first, then lazy umount as fallback
