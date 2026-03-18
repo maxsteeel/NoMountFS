@@ -125,9 +125,7 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 	bool is_dir = false;
 
 	parent = dget_parent(dentry);
-	/* Guard: parent must exist — dentry should always have a parent */
 	if (!parent) {
-		pr_err("NoMountFS: lookup failed - no parent for dentry\n");
 		return ERR_PTR(-ENOENT);
 	}
 	num_lower_parent_paths = nomount_get_all_lower_paths(parent, lower_parent_paths);

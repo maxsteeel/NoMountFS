@@ -225,7 +225,6 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	 *    with no lowerdir required.
 	 */
 	if ((!path_to_mount || !*path_to_mount) && !(source_str && target_str)) {
-		pr_err("NoMountFS: Missing source path.\n");
 		return -EINVAL;
 	}
 
@@ -252,14 +251,12 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		/* Resolve the target file path */
 		err = kern_path(target_str, LOOKUP_FOLLOW, &target_path);
 		if (err) {
-			pr_err("NoMountFS: Could not find target file: %s\n", target_str);
 			goto out_free_sbi;
 		}
 
 		/* Set up injection: source file (path_to_mount) shadows the target */
 		err = kern_path(path_to_mount, LOOKUP_FOLLOW, &sbi->inject_path);
 		if (err) {
-			pr_err("NoMountFS: Could not find source file: %s\n", path_to_mount);
 			path_put(&target_path);
 			goto out_free_sbi;
 		}
@@ -302,7 +299,6 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 			struct path raw;
 			err = kern_path(upperdir_str, LOOKUP_FOLLOW, &raw);
 			if (err) {
-				pr_err("NoMountFS: Could not find upperdir path: %s\n", upperdir_str);
 				goto out_put_path;
 			}
 			/*
@@ -335,13 +331,11 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 				struct path raw;
 				if (!*branch_str) continue;
 				if (sbi->num_lower_paths >= NOMOUNT_MAX_BRANCHES) {
-					pr_err("NoMountFS: Maximum stack depth reached (%d)\n", NOMOUNT_MAX_BRANCHES);
 					err = -EINVAL;
 					goto out_put_path;
 				}
 				err = kern_path(branch_str, LOOKUP_FOLLOW, &raw);
 				if (err) {
-					pr_err("NoMountFS: Could not find lowerdir path: %s\n", branch_str);
 					goto out_put_path;
 				}
 				sbi->lower_paths[sbi->num_lower_paths].dentry = dget(raw.dentry);
@@ -361,7 +355,6 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		}
 		
 		if (sbi->num_lower_paths == 0) {
-			pr_err("NoMountFS: Missing valid upperdir or lowerdir options.\n");
 			err = -EINVAL;
 			goto out_free_sbi;
 		}
@@ -385,8 +378,6 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 			int li;
 			for (li = 1; li < sbi->num_lower_paths; li++) {
 				if (d_inode(sbi->lower_paths[li].dentry) == upper_inode) {
-					pr_err("NoMountFS: lowerdir[%d] is identical to "
-					       "upperdir — redundant layer rejected\n", li - 1);
 					err = -EINVAL;
 					goto out_put_path;
 				}
@@ -398,7 +389,6 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 			struct path raw;
 			err = kern_path(inject_path_str, LOOKUP_FOLLOW, &raw);
 			if (err) {
-				pr_err("NoMountFS: Error accessing injected file '%s'\n", inject_path_str);
 				goto out_put_path;
 			}
 			sbi->inject_path.dentry = dget(raw.dentry);
@@ -425,14 +415,12 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	 * pass the wrong sb type to security_sb_clone_mnt_opts and could BUG().
 	 */
 	if (sbi->num_lower_paths == 0) {
-		pr_err("NoMountFS: No lower paths configured — cannot initialize superblock\n");
 		err = -EINVAL;
 		goto out_put_inject;
 	}
 
 	sbi->lower_sb = sbi->lower_paths[sbi->num_lower_paths - 1].dentry->d_sb;
 	if (!sbi->lower_sb) {
-		pr_err("NoMountFS: Lower superblock is NULL — cannot proceed\n");
 		err = -EINVAL;
 		goto out_put_inject;
 	}
@@ -481,8 +469,6 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 
 	/* Check stack depth to prevent excessive stacking */
 	if (sb->s_stack_depth > FILESYSTEM_MAX_STACK_DEPTH) {
-		pr_err("NoMountFS: Maximum overall stack depth exceeded (%d > %d)\n",
-		       sb->s_stack_depth, FILESYSTEM_MAX_STACK_DEPTH);
 		err = -EINVAL;
 		goto out_put_inject;
 	}
@@ -490,23 +476,19 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	root_inode = nomount_iget(sb, d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry));
 	if (IS_ERR(root_inode)) {
 		err = PTR_ERR(root_inode);
-		pr_err("NoMountFS: Failed to get root inode: %d\n", err);
 		goto out_put_inject;
 	}
 
 	/* Create the virtual root dentry */
 	root = d_make_root(root_inode);
 	if (!root) {
-		pr_err("NoMountFS: Failed to create root dentry\n");
 		err = -ENOMEM;
-		/* d_make_root frees the inode on failure */
 		goto out_put_inject;
 	}
 
 	/* Setup root private data */
 	err = new_dentry_private_data(root);
 	if (err) {
-		pr_err("NoMountFS: Failed to allocate root private data: %d\n", err);
 		dput(root);
 		goto out_put_inject;
 	}
@@ -519,7 +501,6 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 
 	err = security_sb_set_mnt_opts(sb, NULL, 0, NULL);
 	if (err && err != -EOPNOTSUPP) {
-		pr_err("NoMountFS: security_sb_set_mnt_opts failed: %d\n", err);
 		err = 0;
 	}
 	selinux_sb_copy_sid_from(sb,

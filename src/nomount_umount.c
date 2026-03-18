@@ -153,29 +153,14 @@ static int transive_to_domain(const char *domain, struct cred *cred)
 #endif
     tsec = selinux_cred(cred);
     if (!tsec) {
-        pr_err("tsec == NULL!\n");
         return -1;
     }
     error = security_secctx_to_secid(domain, strlen(domain), &sid);
-    if (error) {
-        pr_err("security_secctx_to_secid %s -> sid: %d, error: %d\n", domain, sid, error);
-    }
     if (!error) {
         tsec->sid = sid;
         tsec->create_sid = 0;
         tsec->keycreate_sid = 0;
         tsec->sockcreate_sid = 0;
-
-        /* Verify: read back the context from the sid we just set */
-        struct lsm_context ctx;
-        if (__security_secid_to_secctx(tsec->sid, &ctx) == 0) {
-            pr_err("nomount: transive_to_domain success: sid=%u context=%s\n",
-                   tsec->sid, ctx.context);
-            __security_release_secctx(&ctx);
-        } else {
-            pr_err("nomount: transive_to_domain: sid=%u but failed to read back context\n",
-                   tsec->sid);
-        }
     }
     return error;
 }
@@ -183,15 +168,11 @@ static int transive_to_domain(const char *domain, struct cred *cred)
 void setup_nmfs_cred(void)
 {
     if (!nmfs_cred) {
-        pr_err("nomount: setup_nmfs_cred called but nmfs_cred is NULL\n");
         return;
     }
 
     int err = transive_to_domain("u:r:su:s0", nmfs_cred);
     if (err) {
-        pr_err("nomount: setup nmfs cred failed, err=%d (policy loaded yet?)\n", err);
-    } else {
-        pr_err("nomount: setup nmfs cred SUCCESS\n");
     }
 }
 
@@ -200,8 +181,6 @@ static void nmfs_umount_mnt(struct path *path, int flags)
     int err = path_umount(path, flags);
     if (err) {
         pr_err("nomount: umount %s failed: %d\n", path->dentry->d_iname, err);
-    } else {
-    	pr_err("nomount: umounted successfully");
     }
 }
 
@@ -210,12 +189,10 @@ static void try_umount(const char *mnt, int flags)
     struct path path;
     int err = kern_path(mnt, 0, &path);
     if (err) {
-    	pr_err("nomount: kern_path error");
         return;
     }
 
     if (path.dentry != path.mnt->mnt_root) {
-        pr_err("nomount: it is not root mountpoint, maybe umounted by others already.");
         path_put(&path);
         return;
     }
@@ -232,14 +209,9 @@ static void umount_tw_func(struct callback_head *cb)
     struct nmfs_umount_tw *tw = container_of(cb, struct nmfs_umount_tw, cb);
     const struct cred *saved = override_creds(nmfs_cred);
     struct mount_entry *entry;
-    int count = 0;
 
 	down_read(&nomount_mount_list_lock);
-	pr_err("nomount: acquired read lock, iterating list...\n");
 	list_for_each_entry(entry, &nomount_mount_list, list) {
-		count++;
-		pr_err("nomount: processing entry #%d: %s flags 0x%x\n",
-			count, entry->umountable, entry->flags);
 		try_umount(entry->umountable, entry->flags);
 	}
 	up_read(&nomount_mount_list_lock);
@@ -257,56 +229,36 @@ int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
 
     setup_nmfs_cred();
 
-    if (nmfs_cred) {
+	if (nmfs_cred) {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
-        struct task_security_struct *tsec = selinux_cred(nmfs_cred);
+		struct task_security_struct *tsec = selinux_cred(nmfs_cred);
 #else
-        struct cred_security_struct *tsec = selinux_cred(nmfs_cred);
+		struct cred_security_struct *tsec = selinux_cred(nmfs_cred);
 #endif
-    } else {
-    	pr_err("nomount: nmfs_cred is null");
-    }
+	}
 
     if (!nomount_kernel_umount_enabled) {
-    	pr_err("nomount: kernel umount is disabled");
         return 0;
     }
 
     if (!nmfs_cred) {
-    	pr_err("nomount: nmfs_cred is null");
         return 0;
     }
-    // There are 5 scenarios:
-    // 1. Normal app: zygote -> appuid
-    // 2. Isolated process forked from zygote: zygote -> isolated_process
-    // 3. App zygote forked from zygote: zygote -> appuid
-    // 4. Isolated process froked from app zygote: appuid -> isolated_process (already handled by 3)
-    // 5. Isolated process froked from webview zygote (no need to handle, app cannot run custom code)
     if (!is_appuid(new_uid) && !is_isolated_process(new_uid)) {
-    	pr_err("nomount: not app uid and not isolated 2");
         return 0;
     }
 
     if (!nomount_uid_should_umount(new_uid) && !is_isolated_process(new_uid)) {
-    	pr_err("nomount: shouldn't umount and not isolated process");
         return 0;
     }
 
-    // check old process's selinux context, if it is not zygote, ignore it!
-    // because some su apps may setuid to untrusted_app but they are in global mount namespace
-    // when we umount for such process, that is a disaster!
-    // also handle case 4 and 5
     is_zygote_child = nmfs_is_zygote(get_current_cred());
     if (!is_zygote_child) {
-        pr_err("nomount: handle umount ignore non zygote child: %d\n", current->pid);
         return 0;
     }
-    // umount the target mnt
-    pr_err("nomount: handle umount for uid: %d, pid: %d\n", new_uid, current->pid);
 
     tw = kzalloc(sizeof(*tw), GFP_ATOMIC);
     if (!tw) {
-    	pr_err("nomount: tw is null");
         return 0;
     }
 
@@ -315,7 +267,6 @@ int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
     err = task_work_add(current, &tw->cb, TWA_RESUME);
     if (err) {
         kfree(tw);
-        pr_err("nomount: unmount add task_work failed\n");
     }
 
     return 0;
@@ -323,26 +274,21 @@ int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
 
 int nmfs_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 {
-    // we rely on the fact that zygote always call setresuid(3) with same uids
     uid_t new_uid = ruid;
     uid_t old_uid = current_uid().val;
 
 	if (0 != old_uid) {
-		pr_err("nomount: old process is not root, ignore it.");
 		return 0;
 	}
 
 	if (!nomount_uid_should_umount(new_uid)) {
-		pr_err("nomount: handle setuid ignore non application or isolated uid: %d\n", new_uid);
 		return 0;
 	}
 
 	if (!is_appuid(new_uid) && !is_isolated_process(new_uid)) {
-		pr_err("not appuid and not isolated 1");
         return 0;
     }
 
-	pr_err("nomount: handle_setresuid from %d to %d\n", old_uid, new_uid);
 	nmfs_handle_umount(old_uid, new_uid);
 
 	return 0;
@@ -360,35 +306,29 @@ int nomount_umount_add(const char *path, unsigned int flags)
 	if (!path)
 		return -EINVAL;
 
-	/* Check if already exists */
 	if (nomount_umount_path_exists(path)) {
-		pr_err("nomount: path already in umount list: %s\n", path);
 		return -EEXIST;
 	}
 
-	/* Allocate new entry */
 	new_entry = kzalloc(sizeof(*new_entry), GFP_KERNEL);
 	if (!new_entry) {
-		pr_err("nomount: failed to allocate mount_entry\n");
 		return -ENOMEM;
 	}
 
 	path_copy = kstrdup(path, GFP_KERNEL);
 	if (!path_copy) {
 		kfree(new_entry);
-		pr_err("nomount: failed to kstrdup path\n");
 		return -ENOMEM;
 	}
 
 	new_entry->umountable = path_copy;
 	new_entry->flags = flags;
 
-	/* Add to list */
 	down_write(&nomount_mount_list_lock);
 	list_add_tail(&new_entry->list, &nomount_mount_list);
 	up_write(&nomount_mount_list_lock);
 
-	pr_err("nomount: ADDED to umount list: %s (flags=0x%x)\n", path, flags);
+	pr_info("nomount: ADDED to umount list: %s (flags=0x%x)\n", path, flags);
 
 	return ret;
 }
@@ -407,7 +347,6 @@ int nomount_umount_del(const char *path)
 	down_write(&nomount_mount_list_lock);
 	list_for_each_entry_safe(entry, tmp, &nomount_mount_list, list) {
 		if (strcmp(entry->umountable, path) == 0) {
-			pr_err("nomount: REMOVED from umount list: %s\n", path);
 			list_del(&entry->list);
 			kfree(entry->umountable);
 			kfree(entry);
@@ -429,15 +368,12 @@ int nomount_umount_wipe(void)
 
 	down_write(&nomount_mount_list_lock);
 	list_for_each_entry_safe(entry, tmp, &nomount_mount_list, list) {
-		pr_err("nomount: WIPING umount entry: %s\n", entry->umountable);
 		list_del(&entry->list);
 		kfree(entry->umountable);
 		kfree(entry);
 		count++;
 	}
 	up_write(&nomount_mount_list_lock);
-
-	pr_err("nomount: WIPED %d entries from umount list\n", count);
 
 	return 0;
 }
@@ -468,7 +404,6 @@ int nomount_umount_list(char *buf, size_t buf_size)
 		written = snprintf(buf + offset, buf_size - offset,
 				  "%s\t%u\n", entry->umountable, entry->flags);
 		if (written < 0 || written >= (int)(buf_size - offset)) {
-			pr_err("nomount: buffer full, truncating list\n");
 			break;
 		}
 		offset += written;
@@ -680,10 +615,8 @@ static ssize_t nomount_umount_enabled_write(struct file *file,
 
 	if (val[0] == '1') {
 		nomount_kernel_umount_enabled = true;
-		pr_err("nomount: kernel umount ENABLED\n");
 	} else {
 		nomount_kernel_umount_enabled = false;
-		pr_err("nomount: kernel umount DISABLED\n");
 	}
 
 	return count;
@@ -714,55 +647,41 @@ int nomount_umount_proc_init(void)
 {
 	struct proc_dir_entry *entry;
 
-	pr_err("nomount: initializing procfs interface\n");
-
 	nomount_proc_dir = proc_mkdir(NOMOUNT_PROC_UMOUNT, NULL);
 	if (!nomount_proc_dir) {
-		pr_err("nomount: failed to create proc dir\n");
 		return -ENOMEM;
 	}
 
-	/* umount_list - read-only list of umount paths */
 	entry = proc_create("umount_list", 0444, nomount_proc_dir,
 			    &nomount_umount_list_proc_ops);
 	if (!entry) {
-		pr_err("nomount: failed to create umount_list proc entry\n");
 		goto out_remove_dir;
 	}
 
-	/* umount_add - write-only interface to add paths */
 	entry = proc_create("umount_add", 0200, nomount_proc_dir,
 			    &nomount_umount_add_proc_ops);
 	if (!entry) {
-		pr_err("nomount: failed to create umount_add proc entry\n");
 		goto out_remove_umount_list;
 	}
 
-	/* umount_del - write-only interface to remove paths */
 	entry = proc_create("umount_del", 0200, nomount_proc_dir,
 			    &nomount_umount_del_proc_ops);
 	if (!entry) {
-		pr_err("nomount: failed to create umount_del proc entry\n");
 		goto out_remove_umount_add;
 	}
 
-	/* umount_clear - write-only interface to clear all paths */
 	entry = proc_create("umount_clear", 0200, nomount_proc_dir,
 			    &nomount_umount_clear_proc_ops);
 	if (!entry) {
-		pr_err("nomount: failed to create umount_clear proc entry\n");
 		goto out_remove_umount_del;
 	}
 
-	/* umount_enabled - read/write interface to enable/disable */
 	entry = proc_create("umount_enabled", 0644, nomount_proc_dir,
 			    &nomount_umount_enabled_proc_ops);
 	if (!entry) {
-		pr_err("nomount: failed to create umount_enabled proc entry\n");
 		goto out_remove_umount_clear;
 	}
 
-	pr_err("nomount: procfs interface INITIALIZED\n");
 	return 0;
 
 out_remove_umount_clear:
@@ -783,16 +702,12 @@ out_remove_dir:
  */
 void nomount_umount_proc_exit(void)
 {
-	pr_err("nomount: cleaning up procfs interface\n");
-
 	remove_proc_entry("umount_enabled", nomount_proc_dir);
 	remove_proc_entry("umount_clear", nomount_proc_dir);
 	remove_proc_entry("umount_del", nomount_proc_dir);
 	remove_proc_entry("umount_add", nomount_proc_dir);
 	remove_proc_entry("umount_list", nomount_proc_dir);
 	remove_proc_entry(NOMOUNT_PROC_UMOUNT, NULL);
-
-	pr_err("nomount: procfs interface CLEANED UP\n");
 }
 
 #endif /* CONFIG_NOMOUNT_FS_PROC */
@@ -802,9 +717,6 @@ void nomount_umount_proc_exit(void)
  */
 void nomount_kernel_umount_init(void)
 {
-	pr_err("nomount: INITIALIZING kernel umount subsystem\n");
-
-	/* Initialize the umount list */
 	INIT_LIST_HEAD(&nomount_mount_list);
 
 #ifdef CONFIG_NOMOUNT_FS_PROC
@@ -817,12 +729,9 @@ void nomount_kernel_umount_init(void)
  */
 void nomount_kernel_umount_exit(void)
 {
-	pr_err("nomount: CLEANING UP kernel umount subsystem\n");
-
 #ifdef CONFIG_NOMOUNT_FS_PROC
 	nomount_umount_proc_exit();
 #endif
 
-	/* Free all entries in the umount list */
 	nomount_umount_wipe();
 }

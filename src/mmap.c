@@ -38,9 +38,7 @@ static int nomount_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	lower_vm_ops = NOMOUNT_F(file)->lower_vm_ops;
 	lower_file = nomount_lower_file(file);
 
-	/* Guard: if no lower vm_ops, we cannot forward the fault */
 	if (!lower_vm_ops || !lower_vm_ops->fault) {
-		pr_err_ratelimited("NoMountFS: fault called without lower_vm_ops\n");
 		return VM_FAULT_SIGBUS;
 	}
 
