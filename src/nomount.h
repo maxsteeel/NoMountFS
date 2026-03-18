@@ -288,12 +288,23 @@ static inline void nomount_put_all_lower_paths(const struct dentry *dent, struct
 	}
 }
 
-/* Helpers to set private data  */
+/* Helpers to set private data - MUST only be called before dentry is visible */
 static inline void nomount_set_lower_inode(struct inode *inode, struct inode *lowernode)
 {
 	NOMOUNT_I(inode)->lower_inode = lowernode;
 }
 
+/*
+ * Set lower path(s) for a dentry.
+ *
+ * SAFETY: Must only be called during dentry creation (nomount_lookup/fill_super)
+ * BEFORE the dentry is made visible via d_add() or d_splice_alias().
+ * At that point, no RCU readers can exist, so no locking is needed.
+ *
+ * Called from:
+ * - nomount_lookup(): after new_dentry_private_data(), before d_add/d_splice_alias
+ * - nomount_fill_super(): for root dentry, before sb->s_root assignment
+ */
 static inline void nomount_set_lower_path(struct dentry *dent, struct path *lower_path)
 {
 	pathcpy(&NOMOUNT_D(dent)->lower_paths[0], lower_path);

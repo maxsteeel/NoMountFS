@@ -75,7 +75,12 @@ static int nomount_d_delete(const struct dentry *dentry)
 	struct dentry *lower_dentry;
 	int err = 0;
 
-	if (!dentry->d_fsdata)
+	/*
+	 * Use rcu_access_pointer() to safely check d_fsdata.
+	 * This is RCU-safe without needing rcu_read_lock() because
+	 * we're only checking for NULL, not dereferencing.
+	 */
+	if (!rcu_access_pointer(dentry->d_fsdata))
 		return 1;
 
 	num_lower_paths = nomount_get_all_lower_paths(dentry, lower_paths);

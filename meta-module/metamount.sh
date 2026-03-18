@@ -258,7 +258,11 @@ mount_partition() {
     mount -t nomountfs none "$DEST" \
         -o "upperdir=${MERGED},lowerdir=${DEST}" \
         2>>"$STATE_DIR/mount.log"
-    ${MODDIR}/umounter.sh add $DEST 2>>"$STATE_DIR/umount.log"
+    
+    # Write to pending file for boot-completed.sh to process
+    echo "$DEST" >> "$STATE_DIR/pending_mounts"
+    log "Added to pending mounts: $DEST"
+    
     local rc=$?
     if [ $rc -eq 0 ]; then
         log "OK: $PART -> $DEST"
