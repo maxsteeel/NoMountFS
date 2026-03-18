@@ -117,7 +117,12 @@ int new_dentry_private_data(struct dentry *dentry)
 		return -ENOMEM;
 
 	spin_lock_init(&info->lock);
-	dentry->d_fsdata = info;
+	/*
+	 * Use rcu_assign_pointer() for consistency, though at init time
+	 * the dentry isn't yet visible to other CPUs so this is just
+	 * documenting the RCU annotation requirement.
+	 */
+	rcu_assign_pointer(dentry->d_fsdata, info);
 	return 0;
 }
 
@@ -130,10 +135,26 @@ void free_dentry_private_data(struct dentry *dentry)
 		for (i = 0; i < info->num_lower_paths; i++) {
 			if (info->lower_paths[i].dentry) {
 				path_put(&info->lower_paths[i]);
-				info->lower_paths[i].dentry = NULL; 
+				info->lower_paths[i].dentry = NULL;
 			}
 		}
-        kfree(info);
-        dentry->d_fsdata = NULL;
+		/*
+		 * Clear d_fsdata under dentry->d_lock to prevent race with
+		 * concurrent RCU readers. This matches the 9p fix pattern.
+		 */
+		spin_lock(&dentry->d_lock);
+		rcu_assign_pointer(dentry->d_fsdata, NULL);
+		spin_unlock(&dentry->d_lock);
+
+#ifdef CONFIG_NOMOUNT_RCU_PATH_ACCESS
+		/*
+		 * Use kfree_rcu() to defer freeing until all RCU readers complete.
+		 * The grace period ensures readers who already fetched the pointer
+		 * can finish before the memory is freed.
+		 */
+		kfree_rcu(info, rcu);
+#else
+		kfree(info);
+#endif
     }
 }

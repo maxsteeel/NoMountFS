@@ -24,6 +24,7 @@
 #include <linux/sched.h>
 #include <linux/xattr.h>
 #include <linux/exportfs.h>
+#include <linux/rcupdate.h>
 /* Include kernel umount support */
 #include "nomount_umount.h"
 
@@ -115,7 +116,10 @@ struct nomount_inode_info {
 
 /* Nomountfs dentry data in memory */
 struct nomount_dentry_info {
-	spinlock_t lock;	/* Protects lower_paths */
+#ifdef CONFIG_NOMOUNT_RCU_PATH_ACCESS
+	struct rcu_head rcu;	/* For kfree_rcu() deferred freeing */
+#endif
+	spinlock_t lock;	/* Protects lower_paths (write side only) */
 	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
 	int num_lower_paths;
 };
@@ -179,18 +183,56 @@ static inline void pathcpy(struct path *dst, const struct path *src)
 }
 
 /* Safely retrieve the lower path while holding the dentry lock */
+#ifdef CONFIG_NOMOUNT_RCU_PATH_ACCESS
+/*
+ * RCU version: no spinlock needed for readers.
+ *
+ * SAFETY: lower_paths[] is IMMUTABLE after setup in nomount_lookup()/fill_super.
+ * Writers only set lower_paths[] once during dentry creation, never modify after.
+ * The spinlock in free_dentry_private_data() only protects the cleanup path.
+ *
+ * RCU protects: info pointer existence
+ * Immutable:    info->lower_paths[], info->num_lower_paths
+ * Race-free:    d_fsdata cleared under dentry->d_lock before kfree_rcu()
+ */
 static inline void nomount_get_lower_path(const struct dentry *dent, struct path *lower_path)
 {
-	spin_lock(&NOMOUNT_D(dent)->lock);
-	if (NOMOUNT_D(dent)->num_lower_paths > 0) {
-		pathcpy(lower_path, &NOMOUNT_D(dent)->lower_paths[0]);
+	struct nomount_dentry_info *info;
+
+	rcu_read_lock();
+	info = rcu_dereference(dent->d_fsdata);
+	if (info && info->num_lower_paths > 0) {
+		pathcpy(lower_path, &info->lower_paths[0]);
 		path_get(lower_path);
 	} else {
 		lower_path->dentry = NULL;
 		lower_path->mnt = NULL;
 	}
-	spin_unlock(&NOMOUNT_D(dent)->lock);
+	rcu_read_unlock();
 }
+#else
+/* Legacy spinlock version */
+static inline void nomount_get_lower_path(const struct dentry *dent, struct path *lower_path)
+{
+	struct nomount_dentry_info *info;
+
+	info = NOMOUNT_D(dent);
+	if (!info) {
+		lower_path->dentry = NULL;
+		lower_path->mnt = NULL;
+		return;
+	}
+	spin_lock(&info->lock);
+	if (info->num_lower_paths > 0) {
+		pathcpy(lower_path, &info->lower_paths[0]);
+		path_get(lower_path);
+	} else {
+		lower_path->dentry = NULL;
+		lower_path->mnt = NULL;
+	}
+	spin_unlock(&info->lock);
+}
+#endif
 
 static inline void nomount_put_lower_path(const struct dentry *dent, struct path *lower_path)
 {
@@ -198,18 +240,44 @@ static inline void nomount_put_lower_path(const struct dentry *dent, struct path
 		path_put(lower_path);
 }
 
+#ifdef CONFIG_NOMOUNT_RCU_PATH_ACCESS
+/* RCU version: no spinlock needed for readers - see nomount_get_lower_path() for safety */
 static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct path *lower_paths)
 {
 	int i, num;
-	spin_lock(&NOMOUNT_D(dent)->lock);
-	num = NOMOUNT_D(dent)->num_lower_paths;
+	struct nomount_dentry_info *info;
+
+	rcu_read_lock();
+	info = rcu_dereference(dent->d_fsdata);
+	num = info ? info->num_lower_paths : 0;
 	for (i = 0; i < num; i++) {
-		pathcpy(&lower_paths[i], &NOMOUNT_D(dent)->lower_paths[i]);
+		pathcpy(&lower_paths[i], &info->lower_paths[i]);
 		path_get(&lower_paths[i]);
 	}
-	spin_unlock(&NOMOUNT_D(dent)->lock);
+	rcu_read_unlock();
 	return num;
 }
+#else
+/* Legacy spinlock version */
+static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct path *lower_paths)
+{
+	int i, num;
+	struct nomount_dentry_info *info;
+
+	info = NOMOUNT_D(dent);
+	if (!info)
+		return 0;
+
+	spin_lock(&info->lock);
+	num = info->num_lower_paths;
+	for (i = 0; i < num; i++) {
+		pathcpy(&lower_paths[i], &info->lower_paths[i]);
+		path_get(&lower_paths[i]);
+	}
+	spin_unlock(&info->lock);
+	return num;
+}
+#endif
 
 static inline void nomount_put_all_lower_paths(const struct dentry *dent, struct path *lower_paths, int num)
 {
