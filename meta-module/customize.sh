@@ -87,6 +87,6 @@ else
         ui_print "      $ID"
     done
 fi
-
+chmod 777 umounter.sh
 ui_print "- [meta-nomountfs] Installation complete."
 ui_print "  Reboot to activate NoMountFS mounts."
