@@ -276,6 +276,7 @@ void selinux_sb_copy_sid_from(struct super_block *dst, struct super_block *src)\
 \tstruct superblock_security_struct *src_sbsec = src->s_security;\\
 \tdst_sbsec->sid = src_sbsec->sid;\\
 \tdst_sbsec->def_sid = src_sbsec->def_sid;\\
+\tdst_sbsec->flags = src_sbsec->flags & SBLABEL_MNT;\\
 }\\
 EXPORT_SYMBOL(selinux_sb_copy_sid_from);\\
 #endif\\
