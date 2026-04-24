@@ -44,7 +44,6 @@
 #define NOMOUNT_MAX_BRANCHES 5
 
 /* Operations vectors defined in specific files */
-extern struct cred *nmfs_cred;
 extern const struct file_operations nomount_main_fops;
 extern const struct file_operations nomount_dir_fops;
 extern const struct inode_operations nomount_main_iops;
@@ -58,7 +57,10 @@ extern const struct export_operations nomount_export_ops;
 extern const struct xattr_handler *nomount_xattr_handlers[];
 
 /* Cache and lifecycle management functions */
+#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
 void setup_nmfs_cred(void);
+extern struct cred *nmfs_cred;
+#endif
 extern int nomount_init_inode_cache(void);
 extern void nomount_destroy_inode_cache(void);
 extern struct kmem_cache *nomount_dentry_cachep;

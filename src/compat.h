@@ -179,7 +179,7 @@ static inline struct vfsmount *nomount_clone_private_mount(struct path *path)
 }
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0) && defined(CONFIG_NOMOUNT_FS_KERNEL_UMOUNT)
 __weak int path_umount(struct path *path, int flags)
 {
 	char buf[256] = {0};

@@ -264,26 +264,21 @@ out:
 /* --- XATTR Handling --- */
 
 static ssize_t nomount_getxattr(struct dentry *dentry, struct inode *inode,
-			       const char *name, void *buffer, size_t size)
+				const char *name, void *buffer, size_t size)
 {
 	struct path lower_path;
 	ssize_t err = -EOPNOTSUPP;
 
-	if (!strcmp(name, XATTR_NAME_SELINUX)) {
-		nomount_get_lowest_lower_path(dentry, &lower_path);
-		if (lower_path.dentry) {
-			struct dentry *ld = lower_path.dentry;
-			if (d_is_positive(ld) && d_inode(ld)->i_sb->s_xattr) {
-				err = __vfs_getxattr(ld, d_inode(ld), name, buffer, size, 0);
-			}
-		}
-	} else {
-		nomount_get_lowest_lower_path(dentry, &lower_path);
-		if (lower_path.dentry) {
-			struct dentry *ld = lower_path.dentry;
-			if (d_is_positive(ld) && (d_inode(ld)->i_opflags & IOP_XATTR)) {
-				err = vfs_getxattr(ld, name, buffer, size);
-			}
+	nomount_get_lowest_lower_path(dentry, &lower_path);
+	
+	if (lower_path.dentry && d_is_positive(lower_path.dentry)) {
+		struct dentry *ld = lower_path.dentry;
+		struct inode *linode = d_inode(ld);
+
+		/* First check if the physical inode supports XATTRs using its native flag.
+		 * Then delegate the public call directly to the physical system. */
+		if (linode->i_opflags & IOP_XATTR) {
+			err = vfs_getxattr(ld, name, buffer, size);
 		}
 	}
 

@@ -231,15 +231,42 @@ static void try_umount(const char *mnt, int flags)
     nmfs_umount_mnt(&path, flags);
 }
 
-struct nmfs_umount_tw {
-    struct callback_head cb;
-};
-
-static void umount_tw_func(struct callback_head *cb)
+int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
 {
-    struct nmfs_umount_tw *tw = container_of(cb, struct nmfs_umount_tw, cb);
-    const struct cred *saved = override_creds(nmfs_cred);
-    struct mount_entry *entry;
+	bool is_zygote_child;
+	const struct cred *saved;
+	struct mount_entry *entry;
+
+	setup_nmfs_cred();
+
+	if (!nomount_kernel_umount_enabled) {
+		return 0;
+	}
+
+	if (!nmfs_cred) {
+		return 0;
+	}
+	
+	if (!is_appuid(new_uid) && !is_isolated_process(new_uid)) {
+		return 0;
+	}
+
+	if (!nomount_uid_should_umount(new_uid) && !is_isolated_process(new_uid)) {
+		return 0;
+	}
+
+	is_zygote_child = nmfs_is_zygote(get_current_cred());
+	if (!is_zygote_child) {
+		return 0;
+	}
+
+	/*
+	 * Since we are running from the sys_enter tracepoint, we are not
+	 * trapped under no internal kernel spinlock or semaphore.
+	 * We can do the override_creds and unmount right here, so
+	 * synchronous way, without depending on task_work_add.
+	 */
+	saved = override_creds(nmfs_cred);
 
 	down_read(&nomount_mount_list_lock);
 	list_for_each_entry(entry, &nomount_mount_list, list) {
@@ -247,52 +274,9 @@ static void umount_tw_func(struct callback_head *cb)
 	}
 	up_read(&nomount_mount_list_lock);
 
-    revert_creds(saved);
+	revert_creds(saved);
 
-    kfree(tw);
-}
-
-int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
-{
-    struct nmfs_umount_tw *tw;
-    bool is_zygote_child;
-    int err;
-
-    setup_nmfs_cred();
-
-    if (!nomount_kernel_umount_enabled) {
-        return 0;
-    }
-
-    if (!nmfs_cred) {
-        return 0;
-    }
-    if (!is_appuid(new_uid) && !is_isolated_process(new_uid)) {
-        return 0;
-    }
-
-    if (!nomount_uid_should_umount(new_uid) && !is_isolated_process(new_uid)) {
-        return 0;
-    }
-
-    is_zygote_child = nmfs_is_zygote(get_current_cred());
-    if (!is_zygote_child) {
-        return 0;
-    }
-
-    tw = kzalloc(sizeof(*tw), GFP_ATOMIC);
-    if (!tw) {
-        return 0;
-    }
-
-    tw->cb.func = umount_tw_func;
-
-    err = task_work_add(current, &tw->cb, TWA_RESUME);
-    if (err) {
-        kfree(tw);
-    }
-
-    return 0;
+	return 0;
 }
 
 int nmfs_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)

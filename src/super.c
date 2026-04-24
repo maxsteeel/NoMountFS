@@ -22,8 +22,20 @@ struct superblock_security_struct {
 	spinlock_t isec_lock;
 };
 
+/* Private SELinux inode structure (from security/selinux/include/objsec.h) */
+struct inode_security_struct {
+	struct inode *inode;
+	struct list_head list;
+	u32 task_sid;
+	u32 sid;
+	u16 sclass;
+	unsigned char initialized;
+};
+
+/* Constant to mark inode as properly initialized for SELinux */
+#define LABEL_INITIALIZED 1
+
 /* Constants from security/selinux/include/security.h */
-#define SECURITY_FS_USE_NATIVE 4
 #define SBLABEL_MNT 0x01
 
 static struct kmem_cache *nomount_inode_cachep;
@@ -196,6 +208,7 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	char *p;
 	char *branch_ptr;
 	char *branch_str;
+	struct super_block *lsb;
 	int err = 0;
 	int i;
 
@@ -481,8 +494,9 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	/* Calculate maximum stack depth among all branches */
 	sb->s_stack_depth = 0;
 	for (i = 0; i < sbi->num_lower_paths; i++) {
-		if (sbi->lower_paths[i].dentry->d_sb->s_stack_depth > sb->s_stack_depth) {
-			sb->s_stack_depth = sbi->lower_paths[i].dentry->d_sb->s_stack_depth;
+		lsb = sbi->lower_paths[i].dentry->d_sb;
+		if (lsb->s_stack_depth > sb->s_stack_depth) {
+			sb->s_stack_depth = lsb->s_stack_depth;
 		}
 	}
 	sb->s_stack_depth++; /* Our layer counts as +1 */
@@ -499,29 +513,45 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		goto out_put_inject;
 	}
 
-	/* Create the virtual root dentry */
-	root = d_make_root(root_inode);
+	/*
+	 * d_make_root calls SELinux immediately. If we use it, SELinux 
+	 * will try to read our xattr BEFORE we have linked the 
+	 * physical routes. Solution: Build the dentry manually.
+	 */
+	root = d_alloc_anon(sb);
 	if (!root) {
+		iput(root_inode);
 		err = -ENOMEM;
 		goto out_put_inject;
 	}
 
-	/* Setup root private data */
+	/* The private data of the dentry (physical paths) is prepared */
 	err = new_dentry_private_data(root);
 	if (err) {
 		dput(root);
+		iput(root_inode);
 		goto out_put_inject;
 	}
-
 	nomount_set_lower_paths(root, sbi->lower_paths, sbi->num_lower_paths);
+
+	/* Step B: The inode is instantiated to the dentry.
+	 * SELinux wakes up here, it will call our nomount_getxattr, and 
+	 * since the route is already set, you will get the correct label.
+	 */
+	d_instantiate(root, root_inode);
+
 	sb->s_root = root;
 	d_set_d_op(sb->s_root, &nomount_dops);
 
-	/* d_make_root already hashes the dentry, no need to rehash */
+	/* dentry is already hashed, no need to rehash. */
 
-	err = security_sb_set_mnt_opts(sb, NULL, 0, NULL);
-	if (err && err != -EOPNOTSUPP) {
-		err = 0;
+	/* Clone mount options for SELinux */
+	{
+		unsigned long set_kern_flags = 0;
+		err = security_sb_clone_mnt_opts(sbi->lower_sb, sb, 0, &set_kern_flags);
+		if (err) {
+			pr_err("nomount: security_sb_clone_mnt_opts failed: %d\n", err);
+		}
 	}
 
 	/* Now that SBLABEL_MNT is set, label the root inode from lower */
@@ -529,29 +559,10 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		struct inode *root_lower = d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry);
 		char *ctx = NULL;
 		unsigned int ctxlen = 0;
-		int sec_err = security_inode_getsecctx(root_lower, (void **)&ctx, &ctxlen);
-		if (sec_err == 0 && ctx) {
-			security_inode_notifysecctx(sb->s_root->d_inode, ctx, ctxlen);
+		
+		if (security_inode_getsecctx(root_lower, (void **)&ctx, &ctxlen) == 0 && ctx) {
+			security_inode_notifysecctx(root_inode, ctx, ctxlen);
 			security_release_secctx(ctx, ctxlen);
-		}
-	}
-
-	/* * SELinux modification.
-	 * Cast the generic security pointer to our redefined SELinux structure.
-	 * This completely bypasses the need to patch security/selinux/hooks.c
-	 */
-	if (sb->s_security) {
-		struct superblock_security_struct *sbsec = sb->s_security;
-		struct superblock_security_struct *lower_sbsec = sbi->lower_sb->s_security;
-
-		/* Force native behavior so SELinux allows xattr passthrough */
-		sbsec->behavior = SECURITY_FS_USE_NATIVE;
-
-		/* Copy SID from the lower physical partition */
-		if (lower_sbsec) {
-			sbsec->sid = lower_sbsec->sid;
-			sbsec->def_sid = lower_sbsec->def_sid;
-			sbsec->flags = lower_sbsec->flags & SBLABEL_MNT;
 		}
 	}
 

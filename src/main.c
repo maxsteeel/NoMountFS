@@ -41,13 +41,13 @@ static int __init init_nomount_fs(void)
 	int err;
 
 	pr_info("NoMountFS: Registering filesystem...\n");
+#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
 	nmfs_cred = prepare_creds();
 	if (!nmfs_cred) {
 		pr_err("nomount: prepare cred failed!\n");
 	}
 	setup_nmfs_cred();
 
-#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
 	/* Initialize the kernel umount subsystem */
 	nomount_kernel_umount_init();
 #endif
@@ -105,10 +105,10 @@ static void __exit exit_nomount_fs(void)
 #ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
 	/* Unregister tracepoint hooks first to stop new interceptions safely */
 	nomount_exit_hooks();
-#endif
 
 	if (nmfs_cred)
 		put_cred(nmfs_cred);
+#endif
 	
 	unregister_filesystem(&nomount_fs_type);
 	nomount_destroy_dirent_cache();
