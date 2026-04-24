@@ -468,10 +468,13 @@ async function getModuleMountStates(modules) {
 // ══════════════════════════════════════════════════════════════════════════
 // ── NAV ──
 // ══════════════════════════════════════════════════════════════════════════
-document.querySelectorAll('.nav-item').forEach(item => {
+const navItems = document.querySelectorAll('.nav-item');
+const views    = document.querySelectorAll('.view');
+
+navItems.forEach(item => {
   item.addEventListener('click', () => {
-    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
-    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    navItems.forEach(n => n.classList.remove('active'));
+    views.forEach(v => v.classList.remove('active'));
     item.classList.add('active');
     const view = document.getElementById(item.dataset.view);
     if (view) view.classList.add('active');

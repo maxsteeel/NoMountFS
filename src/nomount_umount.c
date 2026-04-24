@@ -26,7 +26,6 @@
 #include <linux/proc_ns.h>
 #include <linux/sched/task.h>
 #include <linux/security.h>
-#include "objsec.h"
 
 #include "nomount.h"
 #include "nomount_umount.h"
@@ -79,19 +78,30 @@ bool nomount_uid_should_umount(uid_t uid)
 
 /*
  * Check if a path already exists in the umount list
+ * Assumes nomount_mount_list_lock is already held (read or write)
+ */
+static bool __nomount_umount_path_exists_locked(const char *path)
+{
+	struct mount_entry *entry;
+
+	list_for_each_entry(entry, &nomount_mount_list, list) {
+		if (strcmp(entry->umountable, path) == 0) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Check if a path already exists in the umount list
  */
 bool nomount_umount_path_exists(const char *path)
 {
-	struct mount_entry *entry;
-	bool found = false;
+	bool found;
 
 	down_read(&nomount_mount_list_lock);
-	list_for_each_entry(entry, &nomount_mount_list, list) {
-		if (strcmp(entry->umountable, path) == 0) {
-			found = true;
-			break;
-		}
-	}
+	found = __nomount_umount_path_exists_locked(path);
 	up_read(&nomount_mount_list_lock);
 
 	return found;
@@ -116,53 +126,74 @@ static void __security_release_secctx(struct lsm_context *cp)
 #define __security_release_secctx security_release_secctx
 #endif
 
+static u32 cached_zygote_sid = 0;
+
 static bool nmfs_is_zygote(const struct cred *cred)
 {
 	const char *fallback_context = "u:r:zygote:s0";
-    if (!cred) {
-        return false;
-    }
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
-    const struct task_security_struct *tsec = selinux_cred(cred);
-#else
-    const struct cred_security_struct *tsec = selinux_cred(cred);
-#endif
-    if (!tsec) {
-        return false;
-    }
+	u32 current_sid = 0;
 
-    // Slow path fallback: string comparison (only before cache is initialized)
-    struct lsm_context ctx;
-    bool result;
-    if (__security_secid_to_secctx(tsec->sid, &ctx)) {
-        return false;
-    }
-    result = strncmp(fallback_context, ctx.context, ctx.len) == 0;
-    __security_release_secctx(&ctx);
-    return result;
+	/* * Standard API to get the Security ID (SID) without touching SELinux internals.
+	 * This avoids the need for objsec.h and flask.h!
+	 */
+	security_cred_getsecid(cred, &current_sid);
+
+	if (cached_zygote_sid != 0) {
+		return current_sid == cached_zygote_sid;
+	}
+
+	if (security_secctx_to_secid(fallback_context, strlen(fallback_context), &cached_zygote_sid) == 0 && cached_zygote_sid != 0) {
+		return current_sid == cached_zygote_sid;
+	}
+
+	// Slow path fallback: string comparison (only before cache is initialized)
+	struct lsm_context ctx;
+	bool result;
+
+	if (security_secid_to_secctx(current_sid, &ctx.context, &ctx.len) == 0) {
+		result = (strncmp(ctx.context, fallback_context, strlen(fallback_context)) == 0);
+		security_release_secctx(ctx.context, ctx.len);
+		return result;
+	}
+
+	return false;
 }
+
+/*
+ * Private SELinux task security structure.
+ * Redefined here to avoid dependencies on internal SELinux headers (objsec.h).
+ * This structure maps exactly to the SELinux blob in memory.
+ */
+struct nomount_task_security_struct {
+	u32 osid;           /* SID prior to last execve */
+	u32 sid;            /* current SID */
+	u32 exec_sid;       /* exec SID */
+	u32 create_sid;     /* fscreate SID */
+	u32 keycreate_sid;  /* keycreate SID */
+	u32 sockcreate_sid; /* sockcreate SID */
+};
 
 static int transive_to_domain(const char *domain, struct cred *cred)
 {
-    u32 sid;
-    int error;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
-    struct task_security_struct *tsec;
-#else
-    struct cred_security_struct *tsec;
-#endif
-    tsec = selinux_cred(cred);
-    if (!tsec) {
-        return -1;
-    }
-    error = security_secctx_to_secid(domain, strlen(domain), &sid);
-    if (!error) {
-        tsec->sid = sid;
-        tsec->create_sid = 0;
-        tsec->keycreate_sid = 0;
-        tsec->sockcreate_sid = 0;
-    }
-    return error;
+	u32 sid;
+	int error;
+	struct nomount_task_security_struct *tsec;
+
+	if (!cred || !cred->security) {
+		return -1;
+	}
+
+	/* Cast the generic security pointer to our redefined struct */
+	tsec = (struct nomount_task_security_struct *)cred->security;
+
+	error = security_secctx_to_secid(domain, strlen(domain), &sid);
+	if (!error) {
+		tsec->sid = sid;
+		tsec->create_sid = 0;
+		tsec->keycreate_sid = 0;
+		tsec->sockcreate_sid = 0;
+	}
+	return error;
 }
 
 void setup_nmfs_cred(void)
@@ -173,6 +204,7 @@ void setup_nmfs_cred(void)
 
     int err = transive_to_domain("u:r:su:s0", nmfs_cred);
     if (err) {
+        pr_err("nomount: transition to domain failed: %d\n", err);
     }
 }
 
@@ -228,14 +260,6 @@ int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
     int err;
 
     setup_nmfs_cred();
-
-	if (nmfs_cred) {
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 18, 0)
-		struct task_security_struct *tsec = selinux_cred(nmfs_cred);
-#else
-		struct cred_security_struct *tsec = selinux_cred(nmfs_cred);
-#endif
-	}
 
     if (!nomount_kernel_umount_enabled) {
         return 0;
@@ -301,15 +325,11 @@ int nomount_umount_add(const char *path, unsigned int flags)
 {
 	struct mount_entry *new_entry;
 	char *path_copy;
-	int ret = 0;
 
 	if (!path)
 		return -EINVAL;
 
-	if (nomount_umount_path_exists(path)) {
-		return -EEXIST;
-	}
-
+	/* Pre-allocate before acquiring lock */
 	new_entry = kzalloc(sizeof(*new_entry), GFP_KERNEL);
 	if (!new_entry) {
 		return -ENOMEM;
@@ -325,12 +345,21 @@ int nomount_umount_add(const char *path, unsigned int flags)
 	new_entry->flags = flags;
 
 	down_write(&nomount_mount_list_lock);
+
+	/* Double-check existence while holding the lock to avoid race conditions (TOCTOU) */
+	if (__nomount_umount_path_exists_locked(path)) {
+		up_write(&nomount_mount_list_lock);
+		kfree(path_copy);
+		kfree(new_entry);
+		return -EEXIST;
+	}
+
 	list_add_tail(&new_entry->list, &nomount_mount_list);
 	up_write(&nomount_mount_list_lock);
 
 	pr_info("nomount: ADDED to umount list: %s (flags=0x%x)\n", path, flags);
 
-	return ret;
+	return 0;
 }
 
 /*
@@ -473,7 +502,8 @@ static ssize_t nomount_umount_add_write(struct file *file,
 					size_t count, loff_t *ppos)
 {
 	char path[256];
-	size_t len;
+	ssize_t len;
+	int ret;
 
 	if (count >= sizeof(path))
 		return -ENAMETOOLONG;
@@ -492,8 +522,9 @@ static ssize_t nomount_umount_add_write(struct file *file,
 	if (len == 0)
 		return -EINVAL;
 
-	if (nomount_umount_add(path, NOMOUNT_UMOUNT_FLAG_NONE) < 0) {
-		return -EEXIST;
+	ret = nomount_umount_add(path, NOMOUNT_UMOUNT_FLAG_NONE);
+	if (ret < 0) {
+		return ret;
 	}
 
 	return count;
@@ -517,7 +548,7 @@ static ssize_t nomount_umount_del_write(struct file *file,
 					size_t count, loff_t *ppos)
 {
 	char path[256];
-	size_t len;
+	ssize_t len;
 
 	if (count >= sizeof(path))
 		return -ENAMETOOLONG;
@@ -561,7 +592,7 @@ static ssize_t nomount_umount_clear_write(struct file *file,
 					  size_t count, loff_t *ppos)
 {
 	char val[16];
-	size_t len;
+	ssize_t len;
 
 	len = simple_write_to_buffer(val, sizeof(val) - 1, ppos, buf, count);
 	if (len <= 0)
@@ -605,7 +636,7 @@ static ssize_t nomount_umount_enabled_write(struct file *file,
 					    size_t count, loff_t *ppos)
 {
 	char val[16];
-	size_t len;
+	ssize_t len;
 
 	len = simple_write_to_buffer(val, sizeof(val) - 1, ppos, buf, count);
 	if (len <= 0)

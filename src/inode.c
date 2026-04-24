@@ -266,32 +266,28 @@ out:
 static ssize_t nomount_getxattr(struct dentry *dentry, struct inode *inode,
 			       const char *name, void *buffer, size_t size)
 {
-	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
-	int num_paths;
+	struct path lower_path;
 	ssize_t err = -EOPNOTSUPP;
 
-	num_paths = nomount_get_all_lower_paths(dentry, lower_paths);
-	if (num_paths == 0)
-		return -EOPNOTSUPP;
-
 	if (!strcmp(name, XATTR_NAME_SELINUX)) {
-	    struct dentry *ld = lower_paths[num_paths - 1].dentry;
-	    
-	    if (d_is_positive(ld) && d_inode(ld)->i_sb->s_xattr) {
-	        err = __vfs_getxattr(ld, d_inode(ld), name, buffer, size, 0);
-	    } else {
-	        err = -EOPNOTSUPP;
-	    }
+		nomount_get_lowest_lower_path(dentry, &lower_path);
+		if (lower_path.dentry) {
+			struct dentry *ld = lower_path.dentry;
+			if (d_is_positive(ld) && d_inode(ld)->i_sb->s_xattr) {
+				err = __vfs_getxattr(ld, d_inode(ld), name, buffer, size, 0);
+			}
+		}
 	} else {
-		struct dentry *ld = lower_paths[0].dentry;
-		if (!d_is_positive(ld) ||
-		    !(d_inode(ld)->i_opflags & IOP_XATTR))
-			err = -EOPNOTSUPP;
-		else
-			err = vfs_getxattr(ld, name, buffer, size);
+		nomount_get_lowest_lower_path(dentry, &lower_path);
+		if (lower_path.dentry) {
+			struct dentry *ld = lower_path.dentry;
+			if (d_is_positive(ld) && (d_inode(ld)->i_opflags & IOP_XATTR)) {
+				err = vfs_getxattr(ld, name, buffer, size);
+			}
+		}
 	}
 
-	nomount_put_all_lower_paths(dentry, lower_paths, num_paths);
+	nomount_put_lower_path(dentry, &lower_path);
 	return err;
 }
 

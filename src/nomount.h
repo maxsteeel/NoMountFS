@@ -25,12 +25,11 @@
 #include <linux/xattr.h>
 #include <linux/exportfs.h>
 #include <linux/rcupdate.h>
+#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
 /* Include kernel umount support */
 #include "nomount_umount.h"
-
-#ifndef TWA_RESUME
-#define TWA_RESUME true
 #endif
+#include "compat.h"
 
 /* The file system name for 'mount -t nomountfs' */
 #define NOMOUNT_NAME "nomountfs"
@@ -62,8 +61,11 @@ extern const struct xattr_handler *nomount_xattr_handlers[];
 void setup_nmfs_cred(void);
 extern int nomount_init_inode_cache(void);
 extern void nomount_destroy_inode_cache(void);
+extern struct kmem_cache *nomount_dentry_cachep;
 extern int nomount_init_dentry_cache(void);
 extern void nomount_destroy_dentry_cache(void);
+extern int nomount_init_dirent_cache(void);
+extern void nomount_destroy_dirent_cache(void);
 extern int new_dentry_private_data(struct dentry *dentry);
 extern void free_dentry_private_data(struct dentry *dentry);
 
@@ -84,6 +86,10 @@ extern int nomount_readdir(struct file *file, void *dirent, filldir_t filldir);
 extern int nomount_mmap(struct file *file, struct vm_area_struct *vma);
 extern int nomount_test_inode(struct inode *inode, void *data);
 extern int nomount_set_inode(struct inode *inode, void *data);
+
+/* Tracepoint hook functions */
+extern int nomount_init_hooks(void);
+extern void nomount_exit_hooks(void);
 
 /* Used to track already emitted dirents for deduplication */
 struct nomount_dirent {
@@ -131,6 +137,8 @@ struct nomount_sb_info {
 	int num_lower_paths;
 	bool has_inject;
 	char inject_name[NAME_MAX]; /* Name of the file to intercept */
+	size_t inject_name_len;     /* Precomputed length of inject_name */
+	u32 inject_name_hash;       /* Precomputed hash of inject_name */
 	struct path inject_path;    /* Actual path of the modified file */
 	/* Original path strings saved for /proc/mounts show_options.
 	 * d_path() on private vfsmount clones returns "/" — unusable.
@@ -210,6 +218,44 @@ static inline void nomount_get_lower_path(const struct dentry *dent, struct path
 	}
 	rcu_read_unlock();
 }
+
+/*
+ * RCU version: no spinlock needed for readers.
+ * Returns the path of the lowest layer (e.g., the original /system file).
+ */
+static inline void nomount_get_lowest_lower_path(const struct dentry *dent, struct path *lower_path)
+{
+	struct nomount_dentry_info *info;
+
+	rcu_read_lock();
+	info = rcu_dereference(dent->d_fsdata);
+	
+	if (info && info->num_lower_paths > 0) {
+		pathcpy(lower_path, &info->lower_paths[info->num_lower_paths - 1]);
+		path_get(lower_path);
+	} else {
+		lower_path->dentry = NULL;
+		lower_path->mnt = NULL;
+	}
+	rcu_read_unlock();
+}
+
+/* RCU version: no spinlock needed for readers - see nomount_get_lower_path() for safety */
+static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct path *lower_paths)
+{
+	int i, num;
+	struct nomount_dentry_info *info;
+
+	rcu_read_lock();
+	info = rcu_dereference(dent->d_fsdata);
+	num = info ? info->num_lower_paths : 0;
+	for (i = 0; i < num; i++) {
+		pathcpy(&lower_paths[i], &info->lower_paths[i]);
+		path_get(&lower_paths[i]);
+	}
+	rcu_read_unlock();
+	return num;
+}
 #else
 /* Legacy spinlock version */
 static inline void nomount_get_lower_path(const struct dentry *dent, struct path *lower_path)
@@ -232,33 +278,28 @@ static inline void nomount_get_lower_path(const struct dentry *dent, struct path
 	}
 	spin_unlock(&info->lock);
 }
-#endif
 
-static inline void nomount_put_lower_path(const struct dentry *dent, struct path *lower_path)
+static inline void nomount_get_lowest_lower_path(const struct dentry *dent, struct path *lower_path)
 {
-	if (lower_path->dentry)
-		path_put(lower_path);
-}
+	struct nomount_dentry_info *info = NOMOUNT_D(dent);
 
-#ifdef CONFIG_NOMOUNT_RCU_PATH_ACCESS
-/* RCU version: no spinlock needed for readers - see nomount_get_lower_path() for safety */
-static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct path *lower_paths)
-{
-	int i, num;
-	struct nomount_dentry_info *info;
-
-	rcu_read_lock();
-	info = rcu_dereference(dent->d_fsdata);
-	num = info ? info->num_lower_paths : 0;
-	for (i = 0; i < num; i++) {
-		pathcpy(&lower_paths[i], &info->lower_paths[i]);
-		path_get(&lower_paths[i]);
+	if (!info) {
+		lower_path->dentry = NULL;
+		lower_path->mnt = NULL;
+		return;
 	}
-	rcu_read_unlock();
-	return num;
+
+	spin_lock(&info->lock);
+	if (info->num_lower_paths > 0) {
+		pathcpy(lower_path, &info->lower_paths[info->num_lower_paths - 1]);
+		path_get(lower_path);
+	} else {
+		lower_path->dentry = NULL;
+		lower_path->mnt = NULL;
+	}
+	spin_unlock(&info->lock);
 }
-#else
-/* Legacy spinlock version */
+
 static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct path *lower_paths)
 {
 	int i, num;
@@ -278,6 +319,12 @@ static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct 
 	return num;
 }
 #endif
+
+static inline void nomount_put_lower_path(const struct dentry *dent, struct path *lower_path)
+{
+	if (lower_path->dentry)
+		path_put(lower_path);
+}
 
 static inline void nomount_put_all_lower_paths(const struct dentry *dent, struct path *lower_paths, int num)
 {

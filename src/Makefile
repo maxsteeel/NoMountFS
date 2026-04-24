@@ -1,12 +1,14 @@
 #
 # Makefile for NoMountFS
 #
-ccflags-y += -I$(srctree)/security/selinux -I$(srctree)/security/selinux/include
-ccflags-y += -I$(objtree)/security/selinux -include $(srctree)/include/uapi/asm-generic/errno.h
 
 obj-$(CONFIG_NOMOUNT_FS) += nomountfs.o
 
-nomountfs-objs := main.o super.o inode.o file.o lookup.o dentry.o mmap.o nomount_umount.o
+nomountfs-objs := main.o super.o inode.o file.o lookup.o dentry.o mmap.o 
+
+ifeq ($(CONFIG_NOMOUNT_FS_KERNEL_UMOUNT), y)
+nomountfs-objs += nomount_umount.o tp_hook.o
+endif
 
 # Detect if clone_private_mount is exported by this kernel.
 # If not, we fall back to a kallsyms lookup at runtime.

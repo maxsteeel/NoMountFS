@@ -7,6 +7,22 @@
 #include "compat.h"
 #include <linux/uio.h>
 
+static struct kmem_cache *nomount_dirent_cachep;
+
+int nomount_init_dirent_cache(void)
+{
+	nomount_dirent_cachep = kmem_cache_create("nomount_dirent_cache",
+				sizeof(struct nomount_dirent), 0,
+				SLAB_RECLAIM_ACCOUNT, NULL);
+	return nomount_dirent_cachep ? 0 : -ENOMEM;
+}
+
+void nomount_destroy_dirent_cache(void)
+{
+	if (nomount_dirent_cachep)
+		kmem_cache_destroy(nomount_dirent_cachep);
+}
+
 /* * nomount_open: called when a file is being opened.
  * We must open the lower file and store its reference.
  */
@@ -30,7 +46,12 @@ static int nomount_open(struct inode *inode, struct file *file)
 	mutex_init(&info->readdir_mutex);
 	info->num_lower_files = 0;
 
-	num_lower_paths = nomount_get_all_lower_paths(file->f_path.dentry, lower_paths);
+	if (!S_ISDIR(inode->i_mode)) {
+		nomount_get_lower_path(file->f_path.dentry, &lower_paths[0]);
+		num_lower_paths = lower_paths[0].dentry ? 1 : 0;
+	} else {
+		num_lower_paths = nomount_get_all_lower_paths(file->f_path.dentry, lower_paths);
+	}
 	
 	for (i = 0; i < num_lower_paths; i++) {
 		lower_file = dentry_open(&lower_paths[i], file->f_flags, current_cred());
@@ -45,7 +66,12 @@ static int nomount_open(struct inode *inode, struct file *file)
 			break;
 	}
 
-	nomount_put_all_lower_paths(file->f_path.dentry, lower_paths, num_lower_paths);
+	if (!S_ISDIR(inode->i_mode)) {
+		if (lower_paths[0].dentry)
+			nomount_put_lower_path(file->f_path.dentry, &lower_paths[0]);
+	} else {
+		nomount_put_all_lower_paths(file->f_path.dentry, lower_paths, num_lower_paths);
+	}
 
 	if (err && info->num_lower_files == 0) {
 		kfree(info);
@@ -88,7 +114,7 @@ static int nomount_release(struct inode *inode, struct file *file)
 			hash_del(&nd->hash);
 			list_del(&nd->list);
 			kfree(nd->name);
-			kfree(nd);
+			kmem_cache_free(nomount_dirent_cachep, nd);
 		}
 		
 		kfree(info);
@@ -210,17 +236,19 @@ static ssize_t nomount_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	ssize_t err;
 	struct file *file = iocb->ki_filp;
 	struct file *lower_file = nomount_lower_file(file);
-	struct kiocb lower_iocb;
+	struct file *saved_filp;
 
 	if (!lower_file->f_op->read_iter)
 		return -EINVAL;
 
-	/* Clone the control block and switch to lower file context */
-	memcpy(&lower_iocb, iocb, sizeof(struct kiocb));
-	lower_iocb.ki_filp = lower_file;
+	/* Temporarily switch the control block's file context */
+	saved_filp = iocb->ki_filp;
+	iocb->ki_filp = lower_file;
 	
-	err = lower_file->f_op->read_iter(&lower_iocb, iter);
-	iocb->ki_pos = lower_iocb.ki_pos;
+	err = lower_file->f_op->read_iter(iocb, iter);
+	
+	/* Restore the original file context */
+	iocb->ki_filp = saved_filp;
 
 	/* Update times if read succeeded */
 	if (err >= 0 || err == -EIOCBQUEUED)
@@ -234,16 +262,19 @@ static ssize_t nomount_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	ssize_t err;
 	struct file *file = iocb->ki_filp;
 	struct file *lower_file = nomount_lower_file(file);
-	struct kiocb lower_iocb;
+	struct file *saved_filp;
 
 	if (!lower_file->f_op->write_iter)
 		return -EINVAL;
 
-	memcpy(&lower_iocb, iocb, sizeof(struct kiocb));
-	lower_iocb.ki_filp = lower_file;
+	/* Temporarily switch the control block's file context */
+	saved_filp = iocb->ki_filp;
+	iocb->ki_filp = lower_file;
 
-	err = lower_file->f_op->write_iter(&lower_iocb, iter);
-	iocb->ki_pos = lower_iocb.ki_pos;
+	err = lower_file->f_op->write_iter(iocb, iter);
+	
+	/* Restore the original file context */
+	iocb->ki_filp = saved_filp;
 
 	/* Sync size and times after write */
 	if (err >= 0 || err == -EIOCBQUEUED) {
@@ -279,14 +310,14 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
 
 	/* O(1) deduplication check across branches */
 	hash_for_each_possible(nfi->dirent_hashtable, nd, hash, hash_val) {
-		if (nd->len == namelen && strncmp(nd->name, name, namelen) == 0) {
+		if (nd->len == namelen && memcmp(nd->name, name, namelen) == 0) {
 			return 0; /* Already in cache, skip */
 		}
 	}
 
     /* Check if this is the entry we are targeting for injection */
-    if (sbi->has_inject && namelen == strlen(sbi->inject_name) &&
-        strncmp(name, sbi->inject_name, namelen) == 0) {
+    if (sbi->has_inject && namelen == sbi->inject_name_len &&
+        memcmp(name, sbi->inject_name, namelen) == 0) {
         
         nfi->ghost_emitted = true;
         /* Replace inode with the one from the injected file */
@@ -295,16 +326,21 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
     }
 
 	/* Add to deduplication hash table and ordered list */
-	nd = kmalloc(sizeof(*nd), GFP_KERNEL);
-	if (nd) {
-		nd->name = kstrndup(name, namelen, GFP_KERNEL);
-		nd->len = namelen;
-		nd->ino = ino;
-		nd->d_type = d_type;
-		
-		hash_add(nfi->dirent_hashtable, &nd->hash, hash_val);
-		list_add_tail(&nd->list, &nfi->dirents_list);
+	nd = kmem_cache_alloc(nomount_dirent_cachep, GFP_KERNEL);
+	if (!nd)
+		return -ENOMEM;
+
+	nd->name = kstrndup(name, namelen, GFP_KERNEL);
+	if (!nd->name) {
+		kfree(nd);
+		return -ENOMEM;
 	}
+	nd->len = namelen;
+	nd->ino = ino;
+	nd->d_type = d_type;
+		
+	hash_add(nfi->dirent_hashtable, &nd->hash, hash_val);
+	list_add_tail(&nd->list, &nfi->dirents_list);
 
     return 0;
 }
@@ -328,7 +364,7 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 			hash_del(&nd->hash);
 			list_del(&nd->list);
 			kfree(nd->name);
-			kfree(nd);
+			kmem_cache_free(nomount_dirent_cachep, nd);
 		}
 		hash_init(nfi->dirent_hashtable);
 		nfi->ghost_emitted = false;
@@ -362,21 +398,29 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 		if (err >= 0 && is_root && sbi->has_inject && !nfi->ghost_emitted) {
 			u64 fake_ino = d_inode(sbi->inject_path.dentry)->i_ino;
 			
-			nd = kmalloc(sizeof(*nd), GFP_KERNEL);
-			if (nd) {
-				u32 ghost_hash = full_name_hash(NULL, sbi->inject_name, strlen(sbi->inject_name));
-				
+			nd = kmem_cache_alloc(nomount_dirent_cachep, GFP_KERNEL);
+			if (!nd) {
+				err = -ENOMEM;
+			} else {
 				nd->name = kstrdup(sbi->inject_name, GFP_KERNEL);
-				nd->len = strlen(sbi->inject_name);
-				nd->ino = fake_ino;
-				nd->d_type = DT_REG;
-				
-				hash_add(nfi->dirent_hashtable, &nd->hash, ghost_hash);
-				list_add_tail(&nd->list, &nfi->dirents_list);
+				if (!nd->name) {
+					kfree(nd);
+					err = -ENOMEM;
+				} else {
+					nd->len = sbi->inject_name_len;
+					nd->ino = fake_ino;
+					nd->d_type = DT_REG;
+					
+					hash_add(nfi->dirent_hashtable, &nd->hash, sbi->inject_name_hash);
+					list_add_tail(&nd->list, &nfi->dirents_list);
+					nfi->ghost_emitted = true;
+				}
 			}
-			nfi->ghost_emitted = true;
 		}
 	}
+
+	if (err < 0)
+		goto out_unlock;
 
 	/* Emit entries sequentially from cache using simple integer pos */
 	list_for_each_entry(nd, &nfi->dirents_list, list) {
@@ -391,6 +435,7 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 
 	file->f_pos = ctx->pos;
 
+out_unlock:
 	mutex_unlock(&nfi->readdir_mutex);
     return err;
 }
@@ -420,7 +465,7 @@ int nomount_readdir(struct file *file, void *dirent, filldir_t filldir)
         u64 fake_ino = d_inode(sbi->inject_path.dentry)->i_ino;
         
         /* Call the legacy filldir callback manually */
-        if (filldir(dirent, sbi->inject_name, strlen(sbi->inject_name), 
+        if (filldir(dirent, sbi->inject_name, sbi->inject_name_len, 
                     file->f_pos, fake_ino, DT_REG) >= 0) {
             nfi->ghost_emitted = true;
             file->f_pos++;

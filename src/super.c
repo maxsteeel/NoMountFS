@@ -7,7 +7,24 @@
 
 #include <linux/security.h>
 
-extern void selinux_sb_copy_sid_from(struct super_block *dst, struct super_block *src);
+/* * Private SELinux superblock structure extracted from 
+ * 	 security/selinux/include/objsec.h.
+ * * We redefine it here to manipulate SELinux behavior directly 
+ *   without patching the kernel source tree.
+ */
+struct superblock_security_struct {
+	u32 sid;
+	u32 def_sid;
+	u16 behavior;
+	u16 flags;
+	struct mutex lock;
+	struct list_head isec_head;
+	spinlock_t isec_lock;
+};
+
+/* Constants from security/selinux/include/security.h */
+#define SECURITY_FS_USE_NATIVE 4
+#define SBLABEL_MNT 0x01
 
 static struct kmem_cache *nomount_inode_cachep;
 
@@ -81,17 +98,16 @@ void nomount_put_super(struct super_block *sb)
 int nomount_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
 	struct kstatfs lower_buf;
-	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
-	int num_paths;
+	struct path lower_path;
 	int err;
 
-	num_paths = nomount_get_all_lower_paths(dentry, lower_paths);
-	if (num_paths == 0) return -ENOENT;
+	nomount_get_lowest_lower_path(dentry, &lower_path);
+	if (!lower_path.dentry) return -ENOENT;
 
 	/* Get the statfs of the lowest layer to show the physical system disk's free space */
-	err = vfs_statfs(&lower_paths[num_paths - 1], &lower_buf);
-	
-	nomount_put_all_lower_paths(dentry, lower_paths, num_paths);
+	err = vfs_statfs(&lower_path, &lower_buf);
+
+	nomount_put_lower_path(dentry, &lower_path);
 	if (err) return err;
 
 	*buf = lower_buf;
@@ -264,6 +280,8 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		/* Store the target filename for lookup interception */
 		strlcpy(sbi->inject_name, target_path.dentry->d_name.name,
 			sizeof(sbi->inject_name));
+		sbi->inject_name_len = strlen(sbi->inject_name);
+		sbi->inject_name_hash = full_name_hash(NULL, sbi->inject_name, sbi->inject_name_len);
 		sbi->has_inject = true;
 
 		/*
@@ -401,6 +419,8 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 			}
 			mntput(raw.mnt);
 			strlcpy(sbi->inject_name, inject_name_str, sizeof(sbi->inject_name));
+			sbi->inject_name_len = strlen(sbi->inject_name);
+			sbi->inject_name_hash = full_name_hash(NULL, sbi->inject_name, sbi->inject_name_len);
 			strlcpy(sbi->inject_path_str, inject_path_str, PATH_MAX);
 			sbi->has_inject = true;
 		}
@@ -503,8 +523,6 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	if (err && err != -EOPNOTSUPP) {
 		err = 0;
 	}
-	selinux_sb_copy_sid_from(sb,
-		sbi->lower_paths[sbi->num_lower_paths - 1].dentry->d_sb);
 
 	/* Now that SBLABEL_MNT is set, label the root inode from lower */
 	{
@@ -515,6 +533,25 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		if (sec_err == 0 && ctx) {
 			security_inode_notifysecctx(sb->s_root->d_inode, ctx, ctxlen);
 			security_release_secctx(ctx, ctxlen);
+		}
+	}
+
+	/* * SELinux modification.
+	 * Cast the generic security pointer to our redefined SELinux structure.
+	 * This completely bypasses the need to patch security/selinux/hooks.c
+	 */
+	if (sb->s_security) {
+		struct superblock_security_struct *sbsec = sb->s_security;
+		struct superblock_security_struct *lower_sbsec = sbi->lower_sb->s_security;
+
+		/* Force native behavior so SELinux allows xattr passthrough */
+		sbsec->behavior = SECURITY_FS_USE_NATIVE;
+
+		/* Copy SID from the lower physical partition */
+		if (lower_sbsec) {
+			sbsec->sid = lower_sbsec->sid;
+			sbsec->def_sid = lower_sbsec->def_sid;
+			sbsec->flags = lower_sbsec->flags & SBLABEL_MNT;
 		}
 	}
 

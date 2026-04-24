@@ -33,3 +33,18 @@ config NOMOUNT_FS_PROC
 
 	  If disabled, you can still manage the umount list via kernel
 	  hooks or module parameters, but not from userspace at runtime.
+
+config NOMOUNT_RCU_PATH_ACCESS
+	bool "NoMountFS RCU-safe dentry access"
+	depends on NOMOUNT_FS
+	default y
+	help
+	  Enable RCU-safe lockless path walking for NoMountFS.
+	  This dramatically improves performance during concurrent
+	  directory lookups by avoiding spinlocks.
+
+	  It safely handles dentry private data freeing using
+	  kfree_rcu() to prevent use-after-free bugs when the VFS
+	  is in LOOKUP_RCU mode.
+
+	  If unsure, say Y.

@@ -5,7 +5,7 @@
 #include "nomount.h"
 #include "compat.h"
 
-static struct kmem_cache *nomount_dentry_cachep;
+struct kmem_cache *nomount_dentry_cachep;
 
 /* * Inode Cache: Handles the mapping between virtual and real inodes.
  */
@@ -141,7 +141,8 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 	/* Get the superblock info from the dentry's superblock, not allocate new */
 	sbi = NOMOUNT_SB(dentry->d_sb);
 
-	if (sbi && sbi->has_inject && strcmp(name.name, sbi->inject_name) == 0) {
+	if (sbi && sbi->has_inject && name.len == sbi->inject_name_len &&
+		memcmp(name.name, sbi->inject_name, name.len) == 0) {
 		pathcpy(&found_paths[0], &sbi->inject_path);
 		path_get(&found_paths[0]);
 		lower_dentry = found_paths[0].dentry;

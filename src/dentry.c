@@ -117,7 +117,7 @@ int new_dentry_private_data(struct dentry *dentry)
 {
 	struct nomount_dentry_info *info;
 
-	info = kzalloc(sizeof(struct nomount_dentry_info), GFP_KERNEL);
+	info = kmem_cache_zalloc(nomount_dentry_cachep, GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
 
@@ -130,6 +130,14 @@ int new_dentry_private_data(struct dentry *dentry)
 	rcu_assign_pointer(dentry->d_fsdata, info);
 	return 0;
 }
+
+#ifdef CONFIG_NOMOUNT_RCU_PATH_ACCESS
+static void nomount_dentry_rcu_free(struct rcu_head *head)
+{
+	struct nomount_dentry_info *info = container_of(head, struct nomount_dentry_info, rcu);
+	kmem_cache_free(nomount_dentry_cachep, info);
+}
+#endif
 
 void free_dentry_private_data(struct dentry *dentry)
 {
@@ -157,9 +165,9 @@ void free_dentry_private_data(struct dentry *dentry)
 		 * The grace period ensures readers who already fetched the pointer
 		 * can finish before the memory is freed.
 		 */
-		kfree_rcu(info, rcu);
+		call_rcu(&info->rcu, nomount_dentry_rcu_free);
 #else
-		kfree(info);
+		kmem_cache_free(nomount_dentry_cachep, info);
 #endif
     }
 }
