@@ -15,15 +15,9 @@ static int nomount_inode_test(struct inode *inode, void *candidate_lower_inode)
 	return (current_lower_inode == (struct inode *)candidate_lower_inode);
 }
 
-/* Atomic initialization function required by iget5_locked */
-static int nomount_inode_set(struct inode *inode, void *opaque)
+static int nomount_inode_set(struct inode *inode, void *lower_inode)
 {
-	struct inode *lower_inode = opaque;
-	
-	/* We assign the inode number here, under the VFS locks */
-	inode->i_ino = lower_inode->i_ino;
-	/* Required for i_generation and NFS exports */
-	inode->i_generation = lower_inode->i_generation;
+	/* Initialization is done in nomount_iget */
 	return 0;
 }
 
@@ -33,15 +27,14 @@ struct inode *nomount_iget(struct super_block *sb, struct inode *lower_inode)
 {
 	struct inode *inode;
 
-	if (unlikely(!igrab(lower_inode)))
+	if (!igrab(lower_inode))
 		return ERR_PTR(-ESTALE);
 
-	/* Use hash lookup to find if we already have a virtual inode for this real one.
-	 * iget5_locked will call nomount_inode_set internally if it is a new inode */
+	/* Use hash lookup to find if we already have a virtual inode for this real one */
 	inode = iget5_locked(sb, lower_inode->i_ino,
 			     nomount_inode_test, nomount_inode_set, lower_inode);
 
-	if (unlikely(!inode)) {
+	if (!inode) {
 		iput(lower_inode);
 		return ERR_PTR(-ENOMEM);
 	}
@@ -53,6 +46,7 @@ struct inode *nomount_iget(struct super_block *sb, struct inode *lower_inode)
 	}
 
 	/* Setup the new inode */
+	inode->i_ino = lower_inode->i_ino;
 	nomount_set_lower_inode(inode, lower_inode);
 	nomount_inc_iversion(inode);
 
@@ -71,8 +65,8 @@ struct inode *nomount_iget(struct super_block *sb, struct inode *lower_inode)
 	inode->i_mapping->a_ops = &nomount_aops;
 
 	/* Properly initialize special devices (char, block, fifo) */
-	if (unlikely(S_ISBLK(lower_inode->i_mode) || S_ISCHR(lower_inode->i_mode) ||
-	    S_ISFIFO(lower_inode->i_mode) || S_ISSOCK(lower_inode->i_mode)))
+	if (S_ISBLK(lower_inode->i_mode) || S_ISCHR(lower_inode->i_mode) ||
+	    S_ISFIFO(lower_inode->i_mode) || S_ISSOCK(lower_inode->i_mode))
 		init_special_inode(inode, lower_inode->i_mode, lower_inode->i_rdev);
 
 	/* Sync metadata */
@@ -93,7 +87,6 @@ struct inode *nomount_iget(struct super_block *sb, struct inode *lower_inode)
 		}
 	}
 
-	/* Unlock the inode so the rest of the system can use it */
 	unlock_new_inode(inode);
 	return inode;
 }
@@ -268,7 +261,7 @@ int nomount_init_dentry_cache(void)
 {
 	nomount_dentry_cachep = kmem_cache_create("nomount_dentry_cache",
 					sizeof(struct nomount_dentry_info),
-					0, SLAB_RECLAIM_ACCOUNT | SLAB_HWCACHE_ALIGN, NULL);
+					0, SLAB_RECLAIM_ACCOUNT, NULL);
 	return nomount_dentry_cachep ? 0 : -ENOMEM;
 }
 

@@ -30,11 +30,6 @@
 #include "nomount.h"
 #include "nomount_umount.h"
 
-#define ZYGOTE_CONTEXT "u:r:zygote:s0"
-#define ZYGOTE_CONTEXT_LEN (sizeof(ZYGOTE_CONTEXT) - 1)
-#define SU_DOMAIN "u:r:su:s0"
-#define SU_DOMAIN_LEN (sizeof(SU_DOMAIN) - 1)
-
 struct cred *nmfs_cred;
 /* Feature control */
 bool nomount_kernel_umount_enabled = true;
@@ -134,6 +129,7 @@ static u32 cached_zygote_sid = 0;
 
 static bool nmfs_is_zygote(const struct cred *cred)
 {
+	const char *fallback_context = "u:r:zygote:s0";
 	u32 current_sid = 0;
 
 	/* * Standard API to get the Security ID (SID) without touching SELinux internals.
@@ -145,7 +141,7 @@ static bool nmfs_is_zygote(const struct cred *cred)
 		return current_sid == cached_zygote_sid;
 	}
 
-	if (security_secctx_to_secid(ZYGOTE_CONTEXT, ZYGOTE_CONTEXT_LEN, &cached_zygote_sid) == 0 && cached_zygote_sid != 0) {
+	if (security_secctx_to_secid(fallback_context, strlen(fallback_context), &cached_zygote_sid) == 0 && cached_zygote_sid != 0) {
 		return current_sid == cached_zygote_sid;
 	}
 
@@ -154,7 +150,7 @@ static bool nmfs_is_zygote(const struct cred *cred)
 	bool result;
 
 	if (security_secid_to_secctx(current_sid, &ctx.context, &ctx.len) == 0) {
-		result = (strncmp(ctx.context, ZYGOTE_CONTEXT, ZYGOTE_CONTEXT_LEN) == 0);
+		result = (strncmp(ctx.context, fallback_context, strlen(fallback_context)) == 0);
 		security_release_secctx(ctx.context, ctx.len);
 		return result;
 	}
@@ -176,7 +172,7 @@ struct nomount_task_security_struct {
 	u32 sockcreate_sid; /* sockcreate SID */
 };
 
-static int transive_to_domain(const char *domain, size_t len, struct cred *cred)
+static int transive_to_domain(const char *domain, struct cred *cred)
 {
 	u32 sid;
 	int error;
@@ -189,7 +185,7 @@ static int transive_to_domain(const char *domain, size_t len, struct cred *cred)
 	/* Cast the generic security pointer to our redefined struct */
 	tsec = (struct nomount_task_security_struct *)cred->security;
 
-	error = security_secctx_to_secid(domain, len, &sid);
+	error = security_secctx_to_secid(domain, strlen(domain), &sid);
 	if (!error) {
 		tsec->sid = sid;
 		tsec->create_sid = 0;
@@ -205,7 +201,7 @@ void setup_nmfs_cred(void)
         return;
     }
 
-    int err = transive_to_domain(SU_DOMAIN, SU_DOMAIN_LEN, nmfs_cred);
+    int err = transive_to_domain("u:r:su:s0", nmfs_cred);
     if (err) {
         pr_err("nomount: transition to domain failed: %d\n", err);
     }
@@ -261,15 +257,6 @@ int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
 
 	is_zygote_child = nmfs_is_zygote(get_current_cred());
 	if (!is_zygote_child) {
-		return 0;
-	}
-
-	/* Fast path: Check if the list is empty without locking.
-	 * list_empty is safe to call locklessly as it just compares pointers.
-	 * Since umount entries are rarely added/removed during normal operation,
-	 * this saves expensive override_creds and down_read calls.
-	 */
-	if (list_empty(&nomount_mount_list)) {
 		return 0;
 	}
 

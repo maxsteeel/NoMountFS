@@ -41,7 +41,7 @@
 #define NOMOUNT_FS_MAGIC 0xF18F
 
 /* Max number of stacked directories */
-#define NOMOUNT_MAX_BRANCHES 256
+#define NOMOUNT_MAX_BRANCHES 5
 
 /* Operations vectors defined in specific files */
 extern const struct file_operations nomount_main_fops;
