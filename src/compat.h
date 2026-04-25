@@ -212,4 +212,24 @@ out:
 }
 #endif
 
+static inline u64 nomount_query_iversion(struct inode *inode)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
+	return inode_query_iversion(inode);
+#else
+	return inode->i_version;
+#endif
+}
+
+/* Helper to get mtime from inode, handling both old and new kernels */
+static inline u64 nomount_get_mtime(struct inode *inode)
+{
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+    struct timespec64 mtime = inode_get_mtime(inode);
+    return mtime.tv_sec;
+#else
+    return inode->i_mtime.tv_sec;
+#endif
+}
+
 #endif /* _NOMOUNT_COMPAT_H_ */

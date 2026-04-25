@@ -45,6 +45,18 @@ static struct kmem_cache *nomount_inode_cachep;
 static void nomount_evict_inode(struct inode *inode)
 {
 	struct inode *lower_inode;
+	struct nomount_inode_info *nii = NOMOUNT_I(inode);
+	struct nomount_dirent *nd, *tmp;
+
+	/* Clean up cached directory entries */
+	mutex_lock(&nii->readdir_mutex);
+	list_for_each_entry_safe(nd, tmp, &nii->dirents_list, list) {
+		hash_del(&nd->hash);
+		list_del(&nd->list);
+		kfree(nd->name);
+		kmem_cache_free(nomount_dirent_cachep, nd);
+	}
+	mutex_unlock(&nii->readdir_mutex);
 
 	truncate_inode_pages(&inode->i_data, 0);
 	clear_inode(inode);
@@ -68,6 +80,12 @@ static struct inode *nomount_alloc_inode(struct super_block *sb)
 	/* Initialize private data and VFS inode */
 	memset(i, 0, offsetof(struct nomount_inode_info, vfs_inode));
 	nomount_set_iversion(&i->vfs_inode, 1);
+
+	hash_init(i->dirent_hashtable);
+	INIT_LIST_HEAD(&i->dirents_list);
+	mutex_init(&i->readdir_mutex);
+	i->cache_populated = false;
+	i->cache_version = 0;
 
 	return &i->vfs_inode;
 }

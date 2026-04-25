@@ -64,6 +64,7 @@ extern struct cred *nmfs_cred;
 extern int nomount_init_inode_cache(void);
 extern void nomount_destroy_inode_cache(void);
 extern struct kmem_cache *nomount_dentry_cachep;
+extern struct kmem_cache *nomount_dirent_cachep;
 extern int nomount_init_dentry_cache(void);
 extern void nomount_destroy_dentry_cache(void);
 extern int nomount_init_dirent_cache(void);
@@ -109,17 +110,19 @@ struct nomount_file_info {
 	int num_lower_files;
 	const struct vm_operations_struct *lower_vm_ops;
 	bool ghost_emitted;
-	
-	/* For readdir deduplication */
-	DECLARE_HASHTABLE(dirent_hashtable, 8); /* 2^8 = 256 buckets */
-	struct list_head dirents_list;          /* Ordered emission list */
-	struct mutex readdir_mutex;
 };
 
 /* Nomountfs inode data in memory */
 struct nomount_inode_info {
 	struct inode *lower_inode;
 	struct inode vfs_inode;
+
+	/* For readdir deduplication (per-inode caching) */
+	DECLARE_HASHTABLE(dirent_hashtable, 8); /* 2^8 = 256 buckets */
+	struct list_head dirents_list;          /* Ordered emission list */
+	struct mutex readdir_mutex;
+	bool cache_populated;
+	u64 cache_version;
 };
 
 /* Nomountfs dentry data in memory */

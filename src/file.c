@@ -7,7 +7,7 @@
 #include "compat.h"
 #include <linux/uio.h>
 
-static struct kmem_cache *nomount_dirent_cachep;
+struct kmem_cache *nomount_dirent_cachep;
 
 int nomount_init_dirent_cache(void)
 {
@@ -41,9 +41,6 @@ static int nomount_open(struct inode *inode, struct file *file)
 		return -ENOMEM;
  
 	info->ghost_emitted = false;
-	hash_init(info->dirent_hashtable);
-	INIT_LIST_HEAD(&info->dirents_list);
-	mutex_init(&info->readdir_mutex);
 	info->num_lower_files = 0;
 
 	if (!S_ISDIR(inode->i_mode)) {
@@ -99,7 +96,6 @@ static int nomount_open(struct inode *inode, struct file *file)
 static int nomount_release(struct inode *inode, struct file *file)
 {
 	struct nomount_file_info *info = NOMOUNT_F(file);
-	struct nomount_dirent *nd, *tmp;
 	int i;
 
 	if (info) {
@@ -107,14 +103,6 @@ static int nomount_release(struct inode *inode, struct file *file)
 			if (info->lower_files[i]) {
 				fput(info->lower_files[i]);
 			}
-		}
-		
-		/* Clean up cached directory entries */
-		list_for_each_entry_safe(nd, tmp, &info->dirents_list, list) {
-			hash_del(&nd->hash);
-			list_del(&nd->list);
-			kfree(nd->name);
-			kmem_cache_free(nomount_dirent_cachep, nd);
 		}
 		
 		kfree(info);
@@ -291,6 +279,7 @@ struct nomount_readdir_data {
     struct dir_context *orig_ctx;
     struct nomount_sb_info *sbi;
     struct nomount_file_info *nfi;
+	struct nomount_inode_info *nii;
 	int branch_idx;
 };
 
@@ -301,7 +290,7 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
 {
     struct nomount_readdir_data *buf = container_of(ctx, struct nomount_readdir_data, ctx);
     struct nomount_sb_info *sbi = buf->sbi;
-    struct nomount_file_info *nfi = buf->nfi;
+    struct nomount_inode_info *nii = buf->nii;
 	struct nomount_dirent *nd;
 	u32 hash_val;
 
@@ -309,7 +298,7 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
 	hash_val = full_name_hash(NULL, name, namelen);
 
 	/* O(1) deduplication check across branches */
-	hash_for_each_possible(nfi->dirent_hashtable, nd, hash, hash_val) {
+	hash_for_each_possible(nii->dirent_hashtable, nd, hash, hash_val) {
 		if (nd->len == namelen && memcmp(nd->name, name, namelen) == 0) {
 			return 0; /* Already in cache, skip */
 		}
@@ -319,7 +308,9 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
     if (sbi->has_inject && namelen == sbi->inject_name_len &&
         memcmp(name, sbi->inject_name, namelen) == 0) {
         
-        nfi->ghost_emitted = true;
+        if (buf->nfi) {
+            buf->nfi->ghost_emitted = true;
+        }
         /* Replace inode with the one from the injected file */
         ino = d_inode(sbi->inject_path.dentry)->i_ino;
         d_type = DT_REG; 
@@ -339,8 +330,8 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
 	nd->ino = ino;
 	nd->d_type = d_type;
 		
-	hash_add(nfi->dirent_hashtable, &nd->hash, hash_val);
-	list_add_tail(&nd->list, &nfi->dirents_list);
+	hash_add(nii->dirent_hashtable, &nd->hash, hash_val);
+	list_add_tail(&nd->list, &nii->dirents_list);
 
     return 0;
 }
@@ -350,23 +341,36 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 {
     struct nomount_sb_info *sbi = NOMOUNT_SB(file->f_inode->i_sb);
     struct nomount_file_info *nfi = NOMOUNT_F(file);
+	struct nomount_inode_info *nii = NOMOUNT_I(file->f_inode);
     int err = 0;
     bool is_root = (file->f_path.dentry == file->f_inode->i_sb->s_root);
 	int i;
 	int emit_idx = 0;
 	struct nomount_dirent *nd, *tmp;
+	u64 current_version = 0;
 
-	mutex_lock(&nfi->readdir_mutex);
+	mutex_lock(&nii->readdir_mutex);
+
+	/* Check invalidation based on lower files versions/mtimes */
+	for (i = 0; i < nfi->num_lower_files; i++) {
+		struct inode *lower_inode = file_inode(nfi->lower_files[i]);
+		current_version += nomount_get_mtime(lower_inode);
+		current_version += nomount_query_iversion(lower_inode);
+	}
+
+	if (nii->cache_populated && nii->cache_version != current_version) {
+		nii->cache_populated = false; /* Invalidate */
+	}
 
 	/* Populate cache if starting from the beginning */
-	if (ctx->pos == 0) {
-		list_for_each_entry_safe(nd, tmp, &nfi->dirents_list, list) {
+	if (ctx->pos == 0 && !nii->cache_populated) {
+		list_for_each_entry_safe(nd, tmp, &nii->dirents_list, list) {
 			hash_del(&nd->hash);
 			list_del(&nd->list);
 			kfree(nd->name);
 			kmem_cache_free(nomount_dirent_cachep, nd);
 		}
-		hash_init(nfi->dirent_hashtable);
+		hash_init(nii->dirent_hashtable);
 		nfi->ghost_emitted = false;
 
 		/* Read all lower branches into memory to deduplicate safely */
@@ -380,6 +384,7 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 			buf.orig_ctx = ctx;
 			buf.sbi = sbi;
 			buf.nfi = nfi;
+			buf.nii = nii;
 			buf.branch_idx = i;
 
 #ifdef HAVE_ITERATE_SHARED
@@ -411,11 +416,16 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 					nd->ino = fake_ino;
 					nd->d_type = DT_REG;
 					
-					hash_add(nfi->dirent_hashtable, &nd->hash, sbi->inject_name_hash);
-					list_add_tail(&nd->list, &nfi->dirents_list);
+					hash_add(nii->dirent_hashtable, &nd->hash, sbi->inject_name_hash);
+					list_add_tail(&nd->list, &nii->dirents_list);
 					nfi->ghost_emitted = true;
 				}
 			}
+		}
+
+		if (err >= 0) {
+			nii->cache_populated = true;
+			nii->cache_version = current_version;
 		}
 	}
 
@@ -423,7 +433,7 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 		goto out_unlock;
 
 	/* Emit entries sequentially from cache using simple integer pos */
-	list_for_each_entry(nd, &nfi->dirents_list, list) {
+	list_for_each_entry(nd, &nii->dirents_list, list) {
 		if (emit_idx >= ctx->pos) {
 			if (!dir_emit(ctx, nd->name, nd->len, nd->ino, nd->d_type)) {
 				break; /* User buffer is full, pause here */
@@ -436,7 +446,7 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 	file->f_pos = ctx->pos;
 
 out_unlock:
-	mutex_unlock(&nfi->readdir_mutex);
+	mutex_unlock(&nii->readdir_mutex);
     return err;
 }
 #else
