@@ -188,157 +188,193 @@ const struct super_operations nomount_sops = {
 	.show_options = nomount_show_options,
 };
 
-int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
+struct nomount_mount_opts {
+	char *path_to_mount;
+	char *upperdir_str;
+	char *inject_name_str;
+	char *inject_path_str;
+	char *target_str;
+	char *source_str;
+};
+
+/* Parse the mount options from the raw data passed to fill_super.
+ * This supports both regular mounts and direct file injection mounts.
+ */
+static int nomount_parse_options(struct super_block *sb, struct nomount_mount_opts *parsed_opts, void *raw_data)
 {
-	struct dentry *root;
-	struct inode *root_inode;
-	struct nomount_sb_info *sbi;
-	
-	/* 1. Unpack the assembly mount_data */
 	struct nomount_mount_data *mdata = (struct nomount_mount_data *)raw_data;
 	const char *dev_name = mdata ? mdata->dev_name : NULL;
 	char *opts = mdata ? (char *)mdata->raw_data : NULL;
-	
-	char *path_to_mount = NULL;
-	char *upperdir_str = NULL;
-	char *inject_name_str = NULL;
-	char *inject_path_str = NULL;
-	char *target_str = NULL;
-	char *source_str = NULL;
 	char *p;
-	char *branch_ptr;
-	char *branch_str;
-	struct super_block *lsb;
-	int err = 0;
-	int i;
 
-	/* 2. Try to extract the path from the options (e.g. -o lowerdir=/path/example) */
+	/* Initialize the parsed options structure to 0 */
+	memset(parsed_opts, 0, sizeof(*parsed_opts));
+
+	/* Try to extract the path from the options (e.g. -o lowerdir=/path/example) */
 	if (opts) {
 		while ((p = strsep(&opts, ",")) != NULL) {
 			if (!*p) continue;
 			if (!strncmp(p, "lowerdir=", 9)) {
-				path_to_mount = p + 9; /* The word "lowerdir=" is skipped */
+				parsed_opts->path_to_mount = p + 9; // The word "lowerdir=" is skipped
 			} else if (!strncmp(p, "upperdir=", 9)) {
-				upperdir_str = p + 9; 
+				parsed_opts->upperdir_str = p + 9; 
 			} else if (!strncmp(p, "inject_name=", 12)) {
-				inject_name_str = p + 12;
+				parsed_opts->inject_name_str = p + 12;
 			} else if (!strncmp(p, "inject_path=", 12)) {
-				inject_path_str = p + 12;
+				parsed_opts->inject_path_str = p + 12;
 			} else if (!strncmp(p, "target=", 7)) {
-				target_str = p + 7;
+				parsed_opts->target_str = p + 7;
 			} else if (!strncmp(p, "source=", 7)) {
-				source_str = p + 7;
+				parsed_opts->source_str = p + 7;
 			}
 		}
 	}
 
 	/*
-	 * 3. For direct file injection (source= + target=), map source= into
+	 * For direct file injection (source= + target=), map source= into
 	 * path_to_mount so the target= branch at line ~257 can use it via
 	 * kern_path(path_to_mount, ...). Without this, path_to_mount stays NULL
 	 * and kern_path(NULL) panics.
 	 */
-	if (source_str && *source_str && !path_to_mount)
-		path_to_mount = source_str;
+	if (parsed_opts->source_str && *parsed_opts->source_str && !parsed_opts->path_to_mount)
+		parsed_opts->path_to_mount = parsed_opts->source_str;
 
-	/* 4. Fallback: If there is no 'lowerdir', use the original dev_name */
-	if (!path_to_mount && dev_name && *dev_name) {
+	/* Fallback: If there is no 'lowerdir', use the original dev_name */
+	if (!parsed_opts->path_to_mount && dev_name && *dev_name) {
 		/* Ignore generic words that are often used as filler */
 		if (strcmp(dev_name, "none") != 0 && strcmp(dev_name, "nomountfs") != 0 && strcmp(dev_name, "KSU") != 0 && strcmp(dev_name, "APatch") != 0 && strcmp(dev_name, "magisk") != 0 && strcmp(dev_name, "worker") != 0) {
-			path_to_mount = (char *)dev_name;
+			parsed_opts->path_to_mount = (char *)dev_name;
 		}
 	}
 
-	/* 5. Abort cleanly if there is nothing to mount.
-	 *    Exception: source= + target= is a valid direct-injection mount
-	 *    with no lowerdir required.
+	/*  Abort cleanly if there is nothing to mount.
+	 *  Exception: source= + target= is a valid direct-injection mount
+	 *  with no lowerdir required.
 	 */
-	if ((!path_to_mount || !*path_to_mount) && !(source_str && target_str)) {
+	if ((!parsed_opts->path_to_mount || !*parsed_opts->path_to_mount) &&
+		!(parsed_opts->source_str && parsed_opts->target_str)) {
 		return -EINVAL;
 	}
 
 	/* Update superblock ID so /proc/mounts displays it pretty */
-	if (path_to_mount && *path_to_mount)
-		strlcpy(sb->s_id, path_to_mount, sizeof(sb->s_id));
-	else if (source_str && *source_str)
-		strlcpy(sb->s_id, source_str, sizeof(sb->s_id));
+	if (parsed_opts->path_to_mount && *parsed_opts->path_to_mount)
+		strlcpy(sb->s_id, parsed_opts->path_to_mount, sizeof(sb->s_id));
+	else if (parsed_opts->source_str && *parsed_opts->source_str)
+		strlcpy(sb->s_id, parsed_opts->source_str, sizeof(sb->s_id));
 
-	sbi = kzalloc(sizeof(struct nomount_sb_info), GFP_KERNEL);
-	if (!sbi) return -ENOMEM;
-	sb->s_fs_info = sbi;
+	return 0;
+}
 
-	/* 5. Handle direct file injection with target= option
-	 * Syntax: mount -t nomountfs none <mount_dir> -o source=<src>,target=<file_to_shadow>
-	 * The lower_path must be the PARENT DIRECTORY of the target file, not the
-	 * target file itself — the filesystem root must always be a directory inode.
-	 */
-	if (target_str && *target_str) {
-		struct path target_path;
-		struct dentry *parent_dentry;
-		struct path parent_path;
-		
-		/* Resolve the target file path */
-		err = kern_path(target_str, LOOKUP_FOLLOW, &target_path);
-		if (err) {
-			goto out_free_sbi;
-		}
+/* Handle direct file injection with target= option
+* Syntax: mount -t nomountfs none <mount_dir> -o source=<src>,target=<file_to_shadow>
+* The lower_path must be the PARENT DIRECTORY of the target file, not the
+* target file itself — the filesystem root must always be a directory inode.
+*/
+static int nomount_setup_direct_inject(struct nomount_sb_info *sbi, struct nomount_mount_opts *opts)
+{
+	struct path target_path;
+	struct dentry *parent_dentry;
+	struct path parent_path;
+	int err;
 
-		/* Set up injection: source file (path_to_mount) shadows the target */
-		err = kern_path(path_to_mount, LOOKUP_FOLLOW, &sbi->inject_path);
-		if (err) {
-			path_put(&target_path);
-			goto out_free_sbi;
-		}
+	/* Resolve the target file path */
+	err = kern_path(opts->target_str, LOOKUP_FOLLOW, &target_path);
+	if (err) {
+		return err;
+	}
 
-		/* Store the target filename for lookup interception */
-		strlcpy(sbi->inject_name, target_path.dentry->d_name.name,
-			sizeof(sbi->inject_name));
-		sbi->inject_name_len = strlen(sbi->inject_name);
-		sbi->inject_name_hash = full_name_hash(NULL, sbi->inject_name, sbi->inject_name_len);
-		sbi->has_inject = true;
-
-		/*
-		 * Bug fix: use the PARENT directory as the lower_path root, not
-		 * the target file itself. d_make_root requires a directory inode.
-		 * Use a private vfsmount clone so this path isn't affected by
-		 * nomountfs being installed over the same directory.
-		 */
-		parent_dentry = dget_parent(target_path.dentry);
-		parent_path.dentry = parent_dentry;
-		parent_path.mnt = mntget(target_path.mnt);  // same mnt, parent dentry
-		sbi->lower_paths[0].dentry = parent_dentry;
-		sbi->lower_paths[0].mnt = nomount_clone_private_mount(&parent_path);
-		mntput(parent_path.mnt);
-		if (IS_ERR(sbi->lower_paths[0].mnt)) {
-			err = PTR_ERR(sbi->lower_paths[0].mnt);
-			sbi->lower_paths[0].mnt = NULL;
-			dput(parent_dentry);
-			path_put(&sbi->inject_path);
-			sbi->has_inject = false;
-			path_put(&target_path);
-			goto out_free_sbi;
-		}
-		sbi->num_lower_paths = 1;
-
-		/* Release the original file-level reference; we hold parent now */
+	/* Set up injection: source file (path_to_mount) shadows the target */
+	err = kern_path(opts->path_to_mount, LOOKUP_FOLLOW, &sbi->inject_path);
+	if (err) {
 		path_put(&target_path);
-	} else {
-		sbi->num_lower_paths = 0;
+		return err;
+	}
 
-		/* Process upperdir (layer 0) if provided, mimicking OverlayFS */
-		if (upperdir_str && *upperdir_str) {
+	/* Store the target filename for lookup interception */
+	strlcpy(sbi->inject_name, target_path.dentry->d_name.name,
+		sizeof(sbi->inject_name));
+	sbi->inject_name_len = strlen(sbi->inject_name);
+	sbi->inject_name_hash = full_name_hash(NULL, sbi->inject_name, sbi->inject_name_len);
+	sbi->has_inject = true;
+
+	/*
+	 * Use the PARENT directory as the lower_path root, not the target file itself.
+	 * Use a private vfsmount clone so this path isn't affected by
+	 * nomountfs being installed over the same directory.
+	 */
+	parent_dentry = dget_parent(target_path.dentry);
+	parent_path.dentry = parent_dentry;
+	parent_path.mnt = mntget(target_path.mnt); // same mnt, parent dentry
+	sbi->lower_paths[0].dentry = parent_dentry;
+	sbi->lower_paths[0].mnt = nomount_clone_private_mount(&parent_path);
+	mntput(parent_path.mnt);
+	if (IS_ERR(sbi->lower_paths[0].mnt)) {
+		err = PTR_ERR(sbi->lower_paths[0].mnt);
+		sbi->lower_paths[0].mnt = NULL;
+		dput(parent_dentry);
+		path_put(&sbi->inject_path);
+		sbi->has_inject = false;
+		path_put(&target_path);
+		return err;
+	}
+	sbi->num_lower_paths = 1;
+
+	/* Release the original file-level reference; we hold parent now */
+	path_put(&target_path);
+	return 0;
+}
+
+static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mount_opts *opts)
+{
+	char *branch_ptr;
+	char *branch_str;
+	int err;
+
+	sbi->num_lower_paths = 0;
+
+	/* Process upperdir (layer 0) if provided, mimicking OverlayFS */
+	if (opts->upperdir_str && *opts->upperdir_str) {
+		struct path raw;
+		err = kern_path(opts->upperdir_str, LOOKUP_FOLLOW, &raw);
+		if (err) {
+			return err;
+		}
+		/*
+		 * Clone a private vfsmount for each layer path.
+		 * This detaches our reference from the public mount namespace,
+		 * so if nomountfs is mounted over the same path as one of its
+		 * layers, dentry_open and iterate_dir on that layer always
+		 * reach the real underlying fs — never loop back into us.
+		 */
+		sbi->lower_paths[sbi->num_lower_paths].dentry = dget(raw.dentry);
+		sbi->lower_paths[sbi->num_lower_paths].mnt =
+			nomount_clone_private_mount(&raw);
+		if (IS_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt)) {
+			err = PTR_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt);
+			sbi->lower_paths[sbi->num_lower_paths].mnt = NULL;
+			path_put(&raw);
+			return err;
+		}
+		/* raw.mnt ref is now owned by the private clone; release it */
+		mntput(raw.mnt);
+		strlcpy(sbi->lower_path_strs[sbi->num_lower_paths],
+			opts->upperdir_str, PATH_MAX);
+		sbi->num_lower_paths++;
+	}
+
+	/* Process lowerdir(s), splitting by : for union branches */
+	if (opts->path_to_mount && *opts->path_to_mount) {
+		branch_ptr = opts->path_to_mount;
+		while ((branch_str = strsep(&branch_ptr, ":")) != NULL) {
 			struct path raw;
-			err = kern_path(upperdir_str, LOOKUP_FOLLOW, &raw);
-			if (err) {
-				goto out_put_path;
+			if (!*branch_str) continue;
+			if (sbi->num_lower_paths >= NOMOUNT_MAX_BRANCHES) {
+				return -EINVAL;
 			}
-			/*
-			 * Clone a private vfsmount for each layer path.
-			 * This detaches our reference from the public mount namespace,
-			 * so if nomountfs is mounted over the same path as one of its
-			 * layers, dentry_open and iterate_dir on that layer always
-			 * reach the real underlying fs — never loop back into us.
-			 */
+			err = kern_path(branch_str, LOOKUP_FOLLOW, &raw);
+			if (err) {
+				return err;
+			}
 			sbi->lower_paths[sbi->num_lower_paths].dentry = dget(raw.dentry);
 			sbi->lower_paths[sbi->num_lower_paths].mnt =
 				nomount_clone_private_mount(&raw);
@@ -346,116 +382,88 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 				err = PTR_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt);
 				sbi->lower_paths[sbi->num_lower_paths].mnt = NULL;
 				path_put(&raw);
-				goto out_put_path;
+				return err;
 			}
-			/* raw.mnt ref is now owned by the private clone; release it */
 			mntput(raw.mnt);
 			strlcpy(sbi->lower_path_strs[sbi->num_lower_paths],
-				upperdir_str, PATH_MAX);
+				branch_str, PATH_MAX);
 			sbi->num_lower_paths++;
 		}
-
-		/* Process lowerdir(s), splitting by : for union branches */
-		if (path_to_mount && *path_to_mount) {
-			branch_ptr = path_to_mount;
-			while ((branch_str = strsep(&branch_ptr, ":")) != NULL) {
-				struct path raw;
-				if (!*branch_str) continue;
-				if (sbi->num_lower_paths >= NOMOUNT_MAX_BRANCHES) {
-					err = -EINVAL;
-					goto out_put_path;
-				}
-				err = kern_path(branch_str, LOOKUP_FOLLOW, &raw);
-				if (err) {
-					goto out_put_path;
-				}
-				sbi->lower_paths[sbi->num_lower_paths].dentry = dget(raw.dentry);
-				sbi->lower_paths[sbi->num_lower_paths].mnt =
-					nomount_clone_private_mount(&raw);
-				if (IS_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt)) {
-					err = PTR_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt);
-					sbi->lower_paths[sbi->num_lower_paths].mnt = NULL;
-					path_put(&raw);
-					goto out_put_path;
-				}
-				mntput(raw.mnt);
-				strlcpy(sbi->lower_path_strs[sbi->num_lower_paths],
-					branch_str, PATH_MAX);
-				sbi->num_lower_paths++;
-			}
-		}
-		
-		if (sbi->num_lower_paths == 0) {
-			err = -EINVAL;
-			goto out_free_sbi;
-		}
-
-		/*
-		 * Guard: reject if any lowerdir is the exact same directory as
-		 * upperdir (same inode, same superblock). This would cause
-		 * nomount_lookup to see identical entries in both layers and
-		 * produce confusing duplicate results.
-		 *
-		 * The more dangerous case — lowerdir being the same path as the
-		 * VFS mount point — cannot be detected here because fill_super
-		 * runs before the mount is installed. That case is handled safely
-		 * in nomount_lookup via follow_down(), which traverses past any
-		 * mount point sitting on a lower dentry, ensuring we always reach
-		 * the real underlying filesystem rather than looping back into
-		 * ourselves.
-		 */
-		if (upperdir_str && sbi->num_lower_paths > 1) {
-			struct inode *upper_inode = d_inode(sbi->lower_paths[0].dentry);
-			int li;
-			for (li = 1; li < sbi->num_lower_paths; li++) {
-				if (d_inode(sbi->lower_paths[li].dentry) == upper_inode) {
-					err = -EINVAL;
-					goto out_put_path;
-				}
-			}
-		}
-
-		/* Handle Magic Mount injection options */
-		if (inject_name_str && inject_path_str) {
-			struct path raw;
-			err = kern_path(inject_path_str, LOOKUP_FOLLOW, &raw);
-			if (err) {
-				goto out_put_path;
-			}
-			sbi->inject_path.dentry = dget(raw.dentry);
-			sbi->inject_path.mnt = nomount_clone_private_mount(&raw);
-			if (IS_ERR(sbi->inject_path.mnt)) {
-				err = PTR_ERR(sbi->inject_path.mnt);
-				sbi->inject_path.mnt = NULL;
-				path_put(&raw);
-				goto out_put_path;
-			}
-			mntput(raw.mnt);
-			strlcpy(sbi->inject_name, inject_name_str, sizeof(sbi->inject_name));
-			sbi->inject_name_len = strlen(sbi->inject_name);
-			sbi->inject_name_hash = full_name_hash(NULL, sbi->inject_name, sbi->inject_name_len);
-			strlcpy(sbi->inject_path_str, inject_path_str, PATH_MAX);
-			sbi->has_inject = true;
-		}
+	}
+	
+	if (sbi->num_lower_paths == 0) {
+		return -EINVAL;
 	}
 
 	/*
-	 * lower_sb must come from the REAL partition (last lower path), not
-	 * the module's upperdir. The upperdir lives on /data (f2fs/ext4) while
-	 * the real partition is /system (ext4). We clone security opts from the
-	 * real partition's superblock — that's the one with fs_use_xattr set up
-	 * correctly for system_file labels. Using the module dir's sb here would
-	 * pass the wrong sb type to security_sb_clone_mnt_opts and could BUG().
+	 * Guard: reject if any lowerdir is the exact same directory as
+	 * upperdir (same inode, same superblock). This would cause
+	 * nomount_lookup to see identical entries in both layers and
+	 * produce confusing duplicate results.
+	 *
+	 * The more dangerous case — lowerdir being the same path as the
+	 * VFS mount point — cannot be detected here because fill_super
+	 * runs before the mount is installed. That case is handled safely
+	 * in nomount_lookup via follow_down(), which traverses past any
+	 * mount point sitting on a lower dentry, ensuring we always reach
+	 * the real underlying filesystem rather than looping back into
+	 * ourselves.
 	 */
-	if (sbi->num_lower_paths == 0) {
-		err = -EINVAL;
-		goto out_put_inject;
+	if (opts->upperdir_str && sbi->num_lower_paths > 1) {
+		struct inode *upper_inode = d_inode(sbi->lower_paths[0].dentry);
+		int li;
+		for (li = 1; li < sbi->num_lower_paths; li++) {
+			if (d_inode(sbi->lower_paths[li].dentry) == upper_inode) {
+				return -EINVAL;
+			}
+		}
 	}
+
+	/* Handle Magic Mount injection options */
+	if (opts->inject_name_str && opts->inject_path_str) {
+		struct path raw;
+		err = kern_path(opts->inject_path_str, LOOKUP_FOLLOW, &raw);
+		if (err) {
+			return err;
+		}
+		sbi->inject_path.dentry = dget(raw.dentry);
+		sbi->inject_path.mnt = nomount_clone_private_mount(&raw);
+		if (IS_ERR(sbi->inject_path.mnt)) {
+			err = PTR_ERR(sbi->inject_path.mnt);
+			sbi->inject_path.mnt = NULL;
+			path_put(&raw);
+			return err;
+		}
+		mntput(raw.mnt);
+		strlcpy(sbi->inject_name, opts->inject_name_str, sizeof(sbi->inject_name));
+		sbi->inject_name_len = strlen(sbi->inject_name);
+		sbi->inject_name_hash = full_name_hash(NULL, sbi->inject_name, sbi->inject_name_len);
+		strlcpy(sbi->inject_path_str, opts->inject_path_str, PATH_MAX);
+		sbi->has_inject = true;
+	}
+
+	return 0;
+}
+
+/*
+ * lower_sb must come from the REAL partition (last lower path), not
+ * the module's upperdir. The upperdir lives on /data (f2fs/ext4) while
+ * the real partition is /system (ext4). We clone security opts from the
+ * real partition's superblock — that's the one with fs_use_xattr set up
+ * correctly for system_file labels. Using the module dir's sb here would
+ * pass the wrong sb type to security_sb_clone_mnt_opts and could BUG().
+ */
+static int nomount_setup_superblock(struct super_block *sb, struct nomount_sb_info *sbi)
+{
+	struct super_block *lsb;
+	struct inode *root_inode;
+	struct dentry *root;
+	int err;
+	int i;
 
 	sbi->lower_sb = sbi->lower_paths[sbi->num_lower_paths - 1].dentry->d_sb;
 	if (!sbi->lower_sb) {
-		err = -EINVAL;
-		goto out_put_inject;
+		return -EINVAL;
 	}
 
 	sb->s_op = &nomount_sops;
@@ -499,18 +507,16 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 			sb->s_stack_depth = lsb->s_stack_depth;
 		}
 	}
-	sb->s_stack_depth++; /* Our layer counts as +1 */
+	sb->s_stack_depth++;
 
 	/* Check stack depth to prevent excessive stacking */
 	if (sb->s_stack_depth > FILESYSTEM_MAX_STACK_DEPTH) {
-		err = -EINVAL;
-		goto out_put_inject;
+		return -EINVAL;
 	}
 
 	root_inode = nomount_iget(sb, d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry));
 	if (IS_ERR(root_inode)) {
-		err = PTR_ERR(root_inode);
-		goto out_put_inject;
+		return PTR_ERR(root_inode);
 	}
 
 	/*
@@ -521,8 +527,7 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	root = d_alloc_anon(sb);
 	if (!root) {
 		iput(root_inode);
-		err = -ENOMEM;
-		goto out_put_inject;
+		return -ENOMEM;
 	}
 
 	/* The private data of the dentry (physical paths) is prepared */
@@ -530,7 +535,7 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	if (err) {
 		dput(root);
 		iput(root_inode);
-		goto out_put_inject;
+		return err;
 	}
 	nomount_set_lower_paths(root, sbi->lower_paths, sbi->num_lower_paths);
 
@@ -543,28 +548,79 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	sb->s_root = root;
 	d_set_d_op(sb->s_root, &nomount_dops);
 
-	/* dentry is already hashed, no need to rehash. */
+	return 0;
+}
+
+static void nomount_setup_selinux(struct super_block *sb, struct nomount_sb_info *sbi)
+{
+	struct inode *root_inode = d_inode(sb->s_root);
+	struct inode *root_lower = d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry);
+	char *ctx = NULL;
+	unsigned int ctxlen = 0;
+	unsigned long set_kern_flags = 0;
+	int err;
 
 	/* Clone mount options for SELinux */
-	{
-		unsigned long set_kern_flags = 0;
-		err = security_sb_clone_mnt_opts(sbi->lower_sb, sb, 0, &set_kern_flags);
-		if (err) {
-			pr_err("nomount: security_sb_clone_mnt_opts failed: %d\n", err);
-		}
+	err = security_sb_clone_mnt_opts(sbi->lower_sb, sb, 0, &set_kern_flags);
+	if (err) {
+		pr_err("nomount: security_sb_clone_mnt_opts failed: %d\n", err);
 	}
 
 	/* Now that SBLABEL_MNT is set, label the root inode from lower */
-	{
-		struct inode *root_lower = d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry);
-		char *ctx = NULL;
-		unsigned int ctxlen = 0;
-		
-		if (security_inode_getsecctx(root_lower, (void **)&ctx, &ctxlen) == 0 && ctx) {
-			security_inode_notifysecctx(root_inode, ctx, ctxlen);
-			security_release_secctx(ctx, ctxlen);
+	if (security_inode_getsecctx(root_lower, (void **)&ctx, &ctxlen) == 0 && ctx) {
+		security_inode_notifysecctx(root_inode, ctx, ctxlen);
+		security_release_secctx(ctx, ctxlen);
+	}
+}
+
+int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
+{
+	struct nomount_sb_info *sbi;
+	struct nomount_mount_opts opts;
+	int err = 0;
+	int i;
+
+	/* 1. Unpack mount_data */
+	err = nomount_parse_options(sb, &opts, raw_data);
+	if (err) {
+		return err;
+	}
+
+	sbi = kzalloc(sizeof(struct nomount_sb_info), GFP_KERNEL);
+	if (!sbi) return -ENOMEM;
+	sb->s_fs_info = sbi;
+
+	if (opts.target_str && *opts.target_str) {
+		err = nomount_setup_direct_inject(sbi, &opts);
+		if (err) {
+			goto out_free_sbi;
+		}
+	} else {
+		err = nomount_setup_branches(sbi, &opts);
+		if (err) {
+			goto out_put_path;
 		}
 	}
+
+	/*
+	 * lower_sb must come from the REAL partition (last lower path), not
+	 * the module's upperdir. The upperdir lives on /data (f2fs/ext4) while
+	 * the real partition is /system (ext4). We clone security opts from the
+	 * real partition's superblock — that's the one with fs_use_xattr set up
+	 * correctly for system_file labels. Using the module dir's sb here would
+	 * pass the wrong sb type to security_sb_clone_mnt_opts and could BUG().
+	 */
+	if (sbi->num_lower_paths == 0) {
+		err = -EINVAL;
+		goto out_put_inject;
+	}
+
+	err = nomount_setup_superblock(sb, sbi);
+	if (err) {
+		goto out_put_inject;
+	}
+
+	nomount_setup_selinux(sb, sbi);
 
 	return 0;
 
