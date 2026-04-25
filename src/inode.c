@@ -266,23 +266,24 @@ out:
 static ssize_t nomount_getxattr(struct dentry *dentry, struct inode *inode,
 				const char *name, void *buffer, size_t size)
 {
-	struct path lower_path;
+	struct nomount_dentry_info *info;
+	struct dentry *ld;
 	ssize_t err = -EOPNOTSUPP;
 
-	nomount_get_lowest_lower_path(dentry, &lower_path);
-	
-	if (lower_path.dentry && d_is_positive(lower_path.dentry)) {
-		struct dentry *ld = lower_path.dentry;
-		struct inode *linode = d_inode(ld);
+	info = rcu_dereference_raw(dentry->d_fsdata);
+	if (unlikely(!info || !info->lower_paths[0].dentry))
+		return err;
 
+	ld = info->lower_paths[0].dentry;
+
+	if (likely(d_is_positive(ld))) {
 		/* First check if the physical inode supports XATTRs using its native flag.
 		 * Then delegate the public call directly to the physical system. */
-		if (linode->i_opflags & IOP_XATTR) {
+		if (d_inode(ld)->i_opflags & IOP_XATTR) {
 			err = vfs_getxattr(ld, name, buffer, size);
 		}
 	}
 
-	nomount_put_lower_path(dentry, &lower_path);
 	return err;
 }
 
@@ -330,21 +331,22 @@ out:
 
 static ssize_t nomount_listxattr(struct dentry *dentry, char *buffer, size_t buffer_size)
 {
-	int err;
-	struct dentry *lower_dentry;
-	struct path lower_path;
+	struct nomount_dentry_info *info;
+	struct dentry *ld;
+	ssize_t err = -EOPNOTSUPP;
 
-	nomount_get_lower_path(dentry, &lower_path);
-	lower_dentry = lower_path.dentry;
-	if (!(d_inode(lower_dentry)->i_opflags & IOP_XATTR)) {
-		err = -EOPNOTSUPP;
-		goto out;
+	info = rcu_dereference_raw(dentry->d_fsdata);
+	if (unlikely(!info || !info->lower_paths[0].dentry))
+		return err;
+
+	ld = info->lower_paths[0].dentry;
+
+	if (likely(d_is_positive(ld) && (d_inode(ld)->i_opflags & IOP_XATTR))) {
+		err = vfs_listxattr(ld, buffer, buffer_size);
+		if (!err)
+			fsstack_copy_attr_atime(d_inode(dentry), d_inode(ld));
 	}
 
-	err = vfs_listxattr(lower_dentry, buffer, buffer_size);
-	if (!err) fsstack_copy_attr_atime(d_inode(dentry), d_inode(lower_path.dentry));
-out:
-	nomount_put_lower_path(dentry, &lower_path);
 	return err;
 }
 
@@ -394,24 +396,36 @@ static const char *nomount_get_link(struct dentry *dentry,
 				   struct inode *inode,
 				   struct delayed_call *done)
 {
+	struct nomount_dentry_info *info;
 	struct dentry *lower_dentry;
-	struct path lower_path;
-	const char *link;
 
-	if (!dentry) return ERR_PTR(-ECHILD);
+	if (unlikely(!dentry)) return ERR_PTR(-ECHILD);
 
-	nomount_get_lower_path(dentry, &lower_path);
-	lower_dentry = lower_path.dentry;
+	info = rcu_dereference_raw(dentry->d_fsdata);
+	if (unlikely(!info || !info->lower_paths[0].dentry))
+		return ERR_PTR(-ECHILD);
 
-	link = vfs_get_link(lower_dentry, done);
-	nomount_put_lower_path(dentry, &lower_path);
-	return link;
+	lower_dentry = info->lower_paths[0].dentry;
+	return vfs_get_link(lower_dentry, done);
 }
 #endif
 
 static int nomount_permission(struct inode *inode, int mask)
 {
-	return inode_permission(nomount_lower_inode(inode), mask);
+	struct inode *lower_inode;
+	int err;
+
+	/* Fast path for non-blocking access: just pass the request down 
+		to the physical disk using the kernel's _non-blocking_ feature
+		without any locking or copying. */
+	lower_inode = nomount_lower_inode(inode);
+	if (unlikely(mask & MAY_NOT_BLOCK)) {
+		return generic_permission(lower_inode, mask);
+	}
+
+	/* Fall back to the regular path with locking for blocking access. */
+	err = inode_permission(lower_inode, mask);
+	return err;
 }
 
 /* --- Operation Vectors --- */

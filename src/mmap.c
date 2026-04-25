@@ -24,9 +24,9 @@ static int nomount_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	struct vm_area_struct *vma = vmf->vma;
 #endif
 	struct file *file = vma->vm_file;
+	struct nomount_file_info *nfi = NOMOUNT_F(file);
 	struct file *lower_file;
 	const struct vm_operations_struct *lower_vm_ops;
-	struct vm_area_struct lower_vma;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
 	vm_fault_t ret;
 #else
@@ -34,23 +34,26 @@ static int nomount_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 #endif
 
 	/* Clone VMA to protect the original context */
-	memcpy(&lower_vma, vma, sizeof(struct vm_area_struct));
-	lower_vm_ops = NOMOUNT_F(file)->lower_vm_ops;
-	lower_file = nomount_lower_file(file);
+	lower_vm_ops = nfi->lower_vm_ops;
+	lower_file = nfi->lower_files[0];
 
-	BUG_ON(!lower_vm_ops);
+	if (unlikely(!lower_vm_ops || !lower_vm_ops->fault))
+		return VM_FAULT_SIGBUS;
 
-	/* Switch file to the real underlying object */
-	lower_vma.vm_file = lower_file;
+	/* Instead of memcpy'ing the entire VMA (which is slow),
+	 * we temporarily swap the file pointer in the active VMA.
+	 * This avoids false sharing and keeps CPU cache lines clean.
+	 */
+	vma->vm_file = lower_file;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-	/* In modern kernels, we must temporarily point vmf->vma to our clone */
-	vmf->vma = &lower_vma;
 	ret = lower_vm_ops->fault(vmf);
-	vmf->vma = vma; /* Restore original context */
 #else
 	ret = lower_vm_ops->fault(&lower_vma, vmf);
 #endif
+
+	/* Restore original virtual context immediately */
+	vma->vm_file = file;
 
 	return ret;
 }
@@ -64,36 +67,35 @@ static int nomount_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf
 #endif
 {
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 11, 0)
-	struct vm_area_struct *vma = vmf->vma;
+	/* For older kernels, vma is passed directly */
 #else
 	struct vm_area_struct *vma = vmf->vma;
 #endif
 	struct file *file = vma->vm_file;
+	struct nomount_file_info *nfi = NOMOUNT_F(file);
 	struct file *lower_file;
 	const struct vm_operations_struct *lower_vm_ops;
-	struct vm_area_struct lower_vma;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
 	vm_fault_t ret = VM_FAULT_NOPAGE;
 #else
 	int ret = 0;
 #endif
 
-	memcpy(&lower_vma, vma, sizeof(struct vm_area_struct));
-	lower_vm_ops = NOMOUNT_F(file)->lower_vm_ops;
-	lower_file = nomount_lower_file(file);
+	lower_vm_ops = nfi->lower_vm_ops;
+	lower_file = nfi->lower_files[0];
 
-	if (!lower_vm_ops || !lower_vm_ops->page_mkwrite)
+	if (unlikely(!lower_vm_ops || !lower_vm_ops->page_mkwrite))
 		return ret;
 
-	lower_vma.vm_file = lower_file;
+	vma->vm_file = lower_file;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
-	vmf->vma = &lower_vma;
 	ret = lower_vm_ops->page_mkwrite(vmf);
-	vmf->vma = vma;
 #else
-	ret = lower_vm_ops->page_mkwrite(&lower_vma, vmf);
+	ret = lower_vm_ops->page_mkwrite(vma, vmf);
 #endif
+
+	vma->vm_file = file;
 
 	return ret;
 }
@@ -125,8 +127,9 @@ int nomount_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	int err = 0;
 	struct file *lower_file = nomount_lower_file(file);
+	struct nomount_file_info *nfi = NOMOUNT_F(file);
 
-	if (!lower_file->f_op->mmap)
+	if (unlikely(!lower_file->f_op || !lower_file->f_op->mmap))
 		return -ENODEV;
 
 	/*1. Call the lower mmap ALWAYS to initialize the VMA correctly */
@@ -134,12 +137,14 @@ int nomount_mmap(struct file *file, struct vm_area_struct *vma)
 	err = lower_file->f_op->mmap(lower_file, vma);
 	vma->vm_file = file;
 
-	if (err)
+	if (unlikely(err))
 		return err;
 
-	/* Save original operations only the first time */
-	if (!NOMOUNT_F(file)->lower_vm_ops)
-		NOMOUNT_F(file)->lower_vm_ops = vma->vm_ops;
+	/* Do NOT check if it was already saved. Always update it because 
+	 * the physical file system (like f2fs with encryption) might 
+	 * dynamically change its vm_ops after the first mmap call. 
+	 */
+	nfi->lower_vm_ops = vma->vm_ops;
 
 	/* 2. Setup our stacked operations */
 	vma->vm_ops = &nomount_vm_ops;

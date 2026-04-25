@@ -62,11 +62,6 @@ static int __init init_nomount_fs(void)
 	if (err)
 		goto out_free_dentry_cache;
 
-	/* Initialize the memory cache for our directory entries */
-	err = nomount_init_dirent_cache();
-	if (err)
-		goto out_free_dirent_cache;
-
 	/* Register the filesystem in the VFS layer */
 	err = register_filesystem(&nomount_fs_type);
 	if (err)
@@ -84,8 +79,6 @@ static int __init init_nomount_fs(void)
 
 out_unregister_fs:
 	unregister_filesystem(&nomount_fs_type);
-out_free_dirent_cache:
-	nomount_destroy_dirent_cache();
 out_free_dentry_cache:
 	nomount_destroy_dentry_cache();
 out_free_inode_cache:
@@ -111,7 +104,6 @@ static void __exit exit_nomount_fs(void)
 #endif
 	
 	unregister_filesystem(&nomount_fs_type);
-	nomount_destroy_dirent_cache();
 	nomount_destroy_dentry_cache();
 	nomount_destroy_inode_cache();
 #ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT

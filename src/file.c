@@ -7,22 +7,6 @@
 #include "compat.h"
 #include <linux/uio.h>
 
-static struct kmem_cache *nomount_dirent_cachep;
-
-int nomount_init_dirent_cache(void)
-{
-	nomount_dirent_cachep = kmem_cache_create("nomount_dirent_cache",
-				sizeof(struct nomount_dirent), 0,
-				SLAB_RECLAIM_ACCOUNT, NULL);
-	return nomount_dirent_cachep ? 0 : -ENOMEM;
-}
-
-void nomount_destroy_dirent_cache(void)
-{
-	if (nomount_dirent_cachep)
-		kmem_cache_destroy(nomount_dirent_cachep);
-}
-
 /* * nomount_open: called when a file is being opened.
  * We must open the lower file and store its reference.
  */
@@ -113,8 +97,8 @@ static int nomount_release(struct inode *inode, struct file *file)
 		list_for_each_entry_safe(nd, tmp, &info->dirents_list, list) {
 			hash_del(&nd->hash);
 			list_del(&nd->list);
-			kfree(nd->name);
-			kmem_cache_free(nomount_dirent_cachep, nd);
+			/* Just one free to clear structure and name at the same time */
+			kfree(nd);
 		}
 		
 		kfree(info);
@@ -302,8 +286,8 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
     struct nomount_readdir_data *buf = container_of(ctx, struct nomount_readdir_data, ctx);
     struct nomount_sb_info *sbi = buf->sbi;
     struct nomount_file_info *nfi = buf->nfi;
-	struct nomount_dirent *nd;
-	u32 hash_val;
+    struct nomount_dirent *nd;
+    u32 hash_val;
 
 	/* Calculate hash for fast lookup */
 	hash_val = full_name_hash(NULL, name, namelen);
@@ -316,8 +300,8 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
 	}
 
     /* Check if this is the entry we are targeting for injection */
-    if (sbi->has_inject && namelen == sbi->inject_name_len &&
-        memcmp(name, sbi->inject_name, namelen) == 0) {
+    if (unlikely(sbi->has_inject && namelen == sbi->inject_name_len &&
+        memcmp(name, sbi->inject_name, namelen) == 0)) {
         
         nfi->ghost_emitted = true;
         /* Replace inode with the one from the injected file */
@@ -325,16 +309,20 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
         d_type = DT_REG; 
     }
 
-	/* Add to deduplication hash table and ordered list */
-	nd = kmem_cache_alloc(nomount_dirent_cachep, GFP_KERNEL);
-	if (!nd)
-		return -ENOMEM;
+	/* Allocation in a single block.
+     * Total size is calculated: struct + name length + null terminator.
+     * Native kzalloc is then used to allocate the entire memory block, 
+	 * which improves efficiency and reduces fragmentation.
+     */
+    nd = kzalloc(sizeof(struct nomount_dirent) + namelen + 1, GFP_KERNEL);
+    if (unlikely(!nd))
+        return -ENOMEM;
 
-	nd->name = kstrndup(name, namelen, GFP_KERNEL);
-	if (!nd->name) {
-		kfree(nd);
-		return -ENOMEM;
-	}
+	/* The name now lives right after the structure in memory */
+    nd->name = (char *)(nd + 1);
+    memcpy(nd->name, name, namelen);
+    nd->name[namelen] = '\0';
+
 	nd->len = namelen;
 	nd->ino = ino;
 	nd->d_type = d_type;
@@ -350,23 +338,19 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 {
     struct nomount_sb_info *sbi = NOMOUNT_SB(file->f_inode->i_sb);
     struct nomount_file_info *nfi = NOMOUNT_F(file);
-    int err = 0;
+    int i, err = 0;
     bool is_root = (file->f_path.dentry == file->f_inode->i_sb->s_root);
-	int i;
-	int emit_idx = 0;
-	struct nomount_dirent *nd, *tmp;
+    int emit_idx = 0;
+    struct nomount_dirent *nd;
 
 	mutex_lock(&nfi->readdir_mutex);
 
-	/* Populate cache if starting from the beginning */
-	if (ctx->pos == 0) {
-		list_for_each_entry_safe(nd, tmp, &nfi->dirents_list, list) {
-			hash_del(&nd->hash);
-			list_del(&nd->list);
-			kfree(nd->name);
-			kmem_cache_free(nomount_dirent_cachep, nd);
-		}
-		hash_init(nfi->dirent_hashtable);
+	/* * Populate cache if starting from the beginning.
+     * If ctx->pos == 0 but the ghost has already been issued or the list is not empty,
+     * means that the user restarted reading from the same opened directory.
+     * We don't read the disk again, we use the RAM.
+     */
+    if (ctx->pos == 0 && list_empty(&nfi->dirents_list)) {
 		nfi->ghost_emitted = false;
 
 		/* Read all lower branches into memory to deduplicate safely */
@@ -398,28 +382,26 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 		if (err >= 0 && is_root && sbi->has_inject && !nfi->ghost_emitted) {
 			u64 fake_ino = d_inode(sbi->inject_path.dentry)->i_ino;
 			
-			nd = kmem_cache_alloc(nomount_dirent_cachep, GFP_KERNEL);
+			nd = kzalloc(sizeof(struct nomount_dirent) + sbi->inject_name_len + 1, GFP_KERNEL);
 			if (!nd) {
 				err = -ENOMEM;
 			} else {
-				nd->name = kstrdup(sbi->inject_name, GFP_KERNEL);
-				if (!nd->name) {
-					kfree(nd);
-					err = -ENOMEM;
-				} else {
-					nd->len = sbi->inject_name_len;
-					nd->ino = fake_ino;
-					nd->d_type = DT_REG;
+				nd->name = (char *)(nd + 1);
+                memcpy(nd->name, sbi->inject_name, sbi->inject_name_len);
+                nd->name[sbi->inject_name_len] = '\0';
+				
+				nd->len = sbi->inject_name_len;
+				nd->ino = fake_ino;
+				nd->d_type = DT_REG;
 					
-					hash_add(nfi->dirent_hashtable, &nd->hash, sbi->inject_name_hash);
-					list_add_tail(&nd->list, &nfi->dirents_list);
-					nfi->ghost_emitted = true;
-				}
+				hash_add(nfi->dirent_hashtable, &nd->hash, sbi->inject_name_hash);
+				list_add_tail(&nd->list, &nfi->dirents_list);
+				nfi->ghost_emitted = true;
 			}
 		}
 	}
 
-	if (err < 0)
+	if (unlikely(err < 0))
 		goto out_unlock;
 
 	/* Emit entries sequentially from cache using simple integer pos */
