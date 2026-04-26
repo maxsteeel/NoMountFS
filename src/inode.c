@@ -212,6 +212,34 @@ out:
 	return err;
 }
 
+static int nomount_getattr(const struct path *path, struct kstat *stat,
+			   u32 request_mask, unsigned int query_flags)
+{
+	struct nomount_sb_info *sbi = NOMOUNT_SB(path->dentry->d_sb);
+	struct nomount_dentry_info *info;
+	struct path lower_path;
+	int err = -ENOENT;
+
+	/* We extract the active path */
+	info = rcu_access_pointer(path->dentry->d_fsdata);
+	
+	if (likely(info && info->lower_paths[0].dentry)) {
+		lower_path = info->lower_paths[0];
+		err = vfs_getattr(&lower_path, stat, request_mask, query_flags);
+		
+		if (likely(!err && sbi && sbi->lower_sb)) {
+			if (stat->dev != sbi->lower_sb->s_dev) {
+				stat->dev = sbi->lower_sb->s_dev;
+			}
+		}
+	} else {
+		generic_fillattr(d_inode(path->dentry), stat);
+		err = 0;
+	}
+	
+	return err;
+}
+
 static int nomount_setattr(struct dentry *dentry, struct iattr *ia)
 {
 	int err;
@@ -417,6 +445,7 @@ static int nomount_permission(struct inode *inode, int mask)
 /* --- Operation Vectors --- */
 
 const struct inode_operations nomount_dir_iops = {
+	.getattr    = nomount_getattr,
 	.create		= nomount_create,
 	.lookup		= nomount_lookup,
 	.unlink		= nomount_unlink,
@@ -430,12 +459,14 @@ const struct inode_operations nomount_dir_iops = {
 };
 
 const struct inode_operations nomount_main_iops = {
+	.getattr    = nomount_getattr,
 	.permission	= nomount_permission,
 	.setattr	= nomount_setattr,
 	.listxattr	= nomount_listxattr,
 };
 
 const struct inode_operations nomount_symlink_iops = {
+	.getattr    = nomount_getattr,
 #ifdef LEGACY_FOLLOW_LINK
 	.follow_link	= nomount_follow_link,
 #else

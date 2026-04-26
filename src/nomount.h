@@ -44,6 +44,7 @@
 #define NOMOUNT_MAX_BRANCHES 5
 
 /* Operations vectors defined in specific files */
+extern struct file_system_type nomount_fs_type;
 extern const struct file_operations nomount_main_fops;
 extern const struct file_operations nomount_dir_fops;
 extern const struct inode_operations nomount_main_iops;
@@ -150,6 +151,7 @@ struct nomount_sb_info {
 	 * Store the strings from the mount options directly instead. */
 	char lower_path_strs[NOMOUNT_MAX_BRANCHES][PATH_MAX];
 	char inject_path_str[PATH_MAX];
+	struct file_system_type *fake_type; /* For export operations to identify the filesystem type */
 };
 
 /* Structure to safely pass assembly data to fill_super */

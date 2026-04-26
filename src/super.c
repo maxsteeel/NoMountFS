@@ -6,6 +6,7 @@
 #include "compat.h"
 
 #include <linux/security.h>
+#include <linux/uidgid.h>
 
 /* * Private SELinux superblock structure extracted from 
  * 	 security/selinux/include/objsec.h.
@@ -121,36 +122,29 @@ void nomount_put_super(struct super_block *sb)
 	if (sbi->has_inject)
 		path_put(&sbi->inject_path);
 
+	if (sbi->fake_type)
+		kfree(sbi->fake_type);
+
 	kfree(sbi);
 	sb->s_fs_info = NULL;
 }
 
 int nomount_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
-	struct kstatfs lower_buf;
-	struct path lower_path;
+	struct nomount_sb_info *sbi = NOMOUNT_SB(dentry->d_sb);
 	int err;
 
-	nomount_get_lowest_lower_path(dentry, &lower_path);
-	if (!lower_path.dentry) return -ENOENT;
+	if (!sbi || sbi->num_lower_paths == 0) return -ENOSYS;
 
-	/* Get the statfs of the lowest layer to show the physical system disk's free space */
-	err = vfs_statfs(&lower_path, &lower_buf);
-
-	nomount_put_lower_path(dentry, &lower_path);
-	if (err) return err;
-
-	*buf = lower_buf;
-
-	if (lower_buf.f_type != 0) {
-		/* If the one below has a valid type, we use it to hide */
-		buf->f_type = lower_buf.f_type;
-	} else {
-		/* Fallback: If for some reason there is no type, we use our own */
-		buf->f_type = NOMOUNT_FS_MAGIC;
-	}  
-
-	return 0;
+	/* We always measure the actual physical disk (the last layer), 
+	 * ignoring if the current file comes from /data */
+	err = vfs_statfs(&sbi->lower_paths[sbi->num_lower_paths - 1], buf);
+	
+	if (!err && sbi->lower_sb) {
+		buf->f_type = sbi->lower_sb->s_magic;
+	}
+	
+	return err;
 }
 
 /* * nomount_show_options: Displays mount options in /proc/mounts.
@@ -159,11 +153,18 @@ int nomount_statfs(struct dentry *dentry, struct kstatfs *buf)
 static int nomount_show_options(struct seq_file *m, struct dentry *root)
 {
 	struct nomount_sb_info *sbi;
+	uid_t uid;
 	int i;
 
 	if (!root) return 0;
 	sbi = NOMOUNT_SB(root->d_sb);
 	if (!sbi) return 0;
+
+	uid = from_kuid_munged(current_user_ns(), current_uid());
+
+	if (uid >= 1000) {
+		return 0;
+	}
 
 	if (sbi->num_lower_paths > 0 && sbi->lower_path_strs[0][0]) {
 		/*
@@ -195,6 +196,18 @@ static int nomount_show_options(struct seq_file *m, struct dentry *root)
 	return 0;
 }
 
+/* Replace the word "none" in /proc/mounts with the actual physical block */
+static int nomount_show_devname(struct seq_file *m, struct dentry *root)
+{
+	struct nomount_sb_info *sbi = NOMOUNT_SB(root->d_sb);
+	if (sbi && sbi->lower_sb) {
+		seq_printf(m, "/dev/block/%s", sbi->lower_sb->s_id);
+	} else {
+		seq_puts(m, "none");
+	}
+	return 0;
+}
+
 /* Operation vector */
 const struct super_operations nomount_sops = {
 	.alloc_inode	= nomount_alloc_inode,
@@ -204,6 +217,7 @@ const struct super_operations nomount_sops = {
 	.put_super	= nomount_put_super,
 	.statfs		= nomount_statfs,
 	.show_options = nomount_show_options,
+	.show_devname = nomount_show_devname,
 };
 
 struct nomount_mount_opts {
@@ -639,6 +653,15 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 	}
 
 	nomount_setup_selinux(sb, sbi);
+
+	sbi->fake_type = kzalloc(sizeof(struct file_system_type), GFP_KERNEL);
+	if (sbi->fake_type) {
+		*sbi->fake_type = nomount_fs_type;
+		sbi->fake_type->name = sbi->lower_sb->s_type->name;
+		sb->s_type = sbi->fake_type;
+	}
+
+	sb->s_dev = sbi->lower_sb->s_dev;
 
 	return 0;
 

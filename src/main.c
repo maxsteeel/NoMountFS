@@ -28,7 +28,7 @@ static struct dentry *nomount_mount(struct file_system_type *fs_type,
 }
 
 /* File system definition */
-static struct file_system_type nomount_fs_type = {
+struct file_system_type nomount_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= NOMOUNT_NAME, /* This will be "nomountfs" */
 	.mount		= nomount_mount,
