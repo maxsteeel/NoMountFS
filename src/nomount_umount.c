@@ -25,13 +25,11 @@
 #include <linux/file.h>
 #include <linux/proc_ns.h>
 #include <linux/sched/task.h>
-#include <linux/security.h>
 
 #include "nomount.h"
 #include "nomount_umount.h"
 
-struct cred *nmfs_cred;
-/* Feature control */
+struct cred *nmfs_cred = NULL;
 bool nomount_kernel_umount_enabled = true;
 
 /* Global umount list and lock */
@@ -44,9 +42,11 @@ DECLARE_RWSEM(nomount_mount_list_lock);
 #define LAST_APPLICATION_UID 19999
 #define FIRST_ISOLATED_UID 99000
 #define LAST_ISOLATED_UID 99999
-/*
- * Check if uid is in the application UID range
- */
+
+struct nmfs_umount_work {
+	struct callback_head work;
+};
+
 static inline bool is_appuid(uid_t uid)
 {
 	uid_t appid = uid % PER_USER_RANGE;
@@ -106,195 +106,122 @@ bool nomount_umount_path_exists(const char *path)
 	return found;
 }
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 14, 0)
-struct lsm_context {
-    char *context;
-    u32 len;
-};
-
-static int __security_secid_to_secctx(u32 secid, struct lsm_context *cp)
-{
-    return security_secid_to_secctx(secid, &cp->context, &cp->len);
-}
-static void __security_release_secctx(struct lsm_context *cp)
-{
-    security_release_secctx(cp->context, cp->len);
-}
-#else
-#define __security_secid_to_secctx security_secid_to_secctx
-#define __security_release_secctx security_release_secctx
-#endif
-
-static u32 cached_zygote_sid = 0;
-
-static bool nmfs_is_zygote(const struct cred *cred)
-{
-	const char *fallback_context = "u:r:zygote:s0";
-	u32 current_sid = 0;
-
-	/* * Standard API to get the Security ID (SID) without touching SELinux internals.
-	 * This avoids the need for objsec.h and flask.h!
-	 */
-	security_cred_getsecid(cred, &current_sid);
-
-	if (cached_zygote_sid != 0) {
-		return current_sid == cached_zygote_sid;
-	}
-
-	if (security_secctx_to_secid(fallback_context, strlen(fallback_context), &cached_zygote_sid) == 0 && cached_zygote_sid != 0) {
-		return current_sid == cached_zygote_sid;
-	}
-
-	// Slow path fallback: string comparison (only before cache is initialized)
-	struct lsm_context ctx;
-	bool result;
-
-	if (security_secid_to_secctx(current_sid, &ctx.context, &ctx.len) == 0) {
-		result = (strncmp(ctx.context, fallback_context, strlen(fallback_context)) == 0);
-		security_release_secctx(ctx.context, ctx.len);
-		return result;
-	}
-
-	return false;
-}
-
 /*
- * Private SELinux task security structure.
- * Redefined here to avoid dependencies on internal SELinux headers (objsec.h).
- * This structure maps exactly to the SELinux blob in memory.
+ * Replaced manual SELinux domain transitions with prepare_kernel_cred().
+ * This dynamically allocates a credential struct with full root privileges 
+ * (including CAP_SYS_ADMIN), satisfying VFS permission checks natively.
  */
-struct nomount_task_security_struct {
-	u32 osid;           /* SID prior to last execve */
-	u32 sid;            /* current SID */
-	u32 exec_sid;       /* exec SID */
-	u32 create_sid;     /* fscreate SID */
-	u32 keycreate_sid;  /* keycreate SID */
-	u32 sockcreate_sid; /* sockcreate SID */
-};
-
-static int transive_to_domain(const char *domain, struct cred *cred)
-{
-	u32 sid;
-	int error;
-	struct nomount_task_security_struct *tsec;
-
-	if (!cred || !cred->security) {
-		return -1;
-	}
-
-	/* Cast the generic security pointer to our redefined struct */
-	tsec = (struct nomount_task_security_struct *)cred->security;
-
-	error = security_secctx_to_secid(domain, strlen(domain), &sid);
-	if (!error) {
-		tsec->sid = sid;
-		tsec->create_sid = 0;
-		tsec->keycreate_sid = 0;
-		tsec->sockcreate_sid = 0;
-	}
-	return error;
-}
-
 void setup_nmfs_cred(void)
 {
-    if (!nmfs_cred) {
-        return;
-    }
-
-    int err = transive_to_domain("u:r:su:s0", nmfs_cred);
-    if (err) {
-        pr_err("nomount: transition to domain failed: %d\n", err);
-    }
-}
-
-static void nmfs_umount_mnt(struct path *path, int flags)
-{
-    int err = path_umount(path, flags);
-    if (err) {
-        pr_err("nomount: umount %s failed: %d\n", path->dentry->d_iname, err);
-    }
+	if (!nmfs_cred) {
+		/* prepare_kernel_cred(NULL) is a fully exported symbol */
+		nmfs_cred = prepare_kernel_cred(NULL);
+		if (!nmfs_cred) {
+			pr_err("nomount: failed to allocate kernel credentials\n");
+		}
+	}
 }
 
 static void try_umount(const char *mnt, int flags)
 {
-    struct path path;
-    int err = kern_path(mnt, 0, &path);
-    if (err) {
-        return;
-    }
+	struct path path;
+	int err;
 
-    if (path.dentry != path.mnt->mnt_root) {
-        path_put(&path);
-        return;
-    }
+	/* FORCE MNT_DETACH (2) regardless of what userspace requested */
+	flags |= MNT_DETACH;
 
-    nmfs_umount_mnt(&path, flags);
+	/* The native path structure of the kernel is obtained */
+	err = kern_path(mnt, 0, &path);
+	if (err) {
+		pr_err("nomount: kern_path failed for %s (err: %d)\n", mnt, err);
+		return;
+	}
+
+	/* Ensure that we are unmounting the actual root of the mount point */
+	if (path.dentry != path.mnt->mnt_root) {
+		pr_err("nomount: %s is not a mount root, skipping.\n", mnt);
+		path_put(&path);
+		return;
+	}
+
+	/* Execute the native unmount */
+	err = path_umount(&path, flags);
+	
+	if (err && err != -ENOENT && err != -EINVAL) {
+		pr_err("nomount: umount %s failed: %d\n", mnt, err);
+	} else if (err == 0) {
+		pr_debug("nomount: SUCCESS! %s unmounted from app namespace.\n", mnt);
+	}
 }
 
-int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
+static void nmfs_do_umount_work(struct callback_head *work)
 {
-	bool is_zygote_child;
+	struct nmfs_umount_work *nw = container_of(work, struct nmfs_umount_work, work);
 	const struct cred *saved;
 	struct mount_entry *entry;
 
 	setup_nmfs_cred();
+	if (nmfs_cred) {
+		saved = override_creds(nmfs_cred);
+
+		down_read(&nomount_mount_list_lock);
+		list_for_each_entry(entry, &nomount_mount_list, list) {
+			try_umount(entry->umountable, entry->flags);
+		}
+		up_read(&nomount_mount_list_lock);
+
+		revert_creds(saved);
+	}
+
+	kfree(nw);
+}
+
+int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
+{
+	struct nmfs_umount_work *nw;
 
 	if (!nomount_kernel_umount_enabled) {
+		pr_info("nomount: Kernel umount disabled, skipping umount handling.\n");
 		return 0;
 	}
 
-	if (!nmfs_cred) {
-		return 0;
-	}
-	
 	if (!is_appuid(new_uid) && !is_isolated_process(new_uid)) {
+		pr_info("nomount: New UID %u is not an app or isolated UID, skipping umount.\n", new_uid);
 		return 0;
 	}
 
 	if (!nomount_uid_should_umount(new_uid) && !is_isolated_process(new_uid)) {
+		pr_info("nomount: New UID %u does not require umount, skipping.\n", new_uid);
 		return 0;
 	}
 
-	is_zygote_child = nmfs_is_zygote(get_current_cred());
-	if (!is_zygote_child) {
+	if (old_uid != 0) {
+		pr_info("nomount: Old UID %u is not root, skipping umount handling.\n", old_uid);
 		return 0;
 	}
 
-	/*
-	 * Since we are running from the sys_enter tracepoint, we are not
-	 * trapped under no internal kernel spinlock or semaphore.
-	 * We can do the override_creds and unmount right here, so
-	 * synchronous way, without depending on task_work_add.
-	 */
-	saved = override_creds(nmfs_cred);
+	nw = kzalloc(sizeof(*nw), GFP_ATOMIC);
+	if (!nw) return 0;
 
-	down_read(&nomount_mount_list_lock);
-	list_for_each_entry(entry, &nomount_mount_list, list) {
-		try_umount(entry->umountable, entry->flags);
+	init_task_work(&nw->work, nmfs_do_umount_work);
+
+	if (task_work_add(current, &nw->work, TWA_RESUME)) {
+		pr_err("nomount: task_work_add failed!\n");
+		kfree(nw);
+	} else {
+		pr_debug("nomount: App Launch Detected! Deferring umount work...\n");
 	}
-	up_read(&nomount_mount_list_lock);
-
-	revert_creds(saved);
 
 	return 0;
 }
 
 int nmfs_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 {
-    uid_t new_uid = ruid;
-    uid_t old_uid = current_uid().val;
+	uid_t new_uid = ruid;
+	uid_t old_uid = current_uid().val;
 
-	if (0 != old_uid) {
+	if (old_uid != 0)
 		return 0;
-	}
-
-	if (!nomount_uid_should_umount(new_uid)) {
-		return 0;
-	}
-
-	if (!is_appuid(new_uid) && !is_isolated_process(new_uid)) {
-        return 0;
-    }
 
 	nmfs_handle_umount(old_uid, new_uid);
 
@@ -309,17 +236,20 @@ int nomount_umount_add(const char *path, unsigned int flags)
 	struct mount_entry *new_entry;
 	char *path_copy;
 
-	if (!path)
+	if (!path) {
+		pr_err("nomount: umount_add called with NULL path\n");
 		return -EINVAL;
+	}
 
-	/* Pre-allocate before acquiring lock */
 	new_entry = kzalloc(sizeof(*new_entry), GFP_KERNEL);
 	if (!new_entry) {
+		pr_err("nomount: failed to allocate memory for mount entry\n");
 		return -ENOMEM;
 	}
 
 	path_copy = kstrdup(path, GFP_KERNEL);
 	if (!path_copy) {
+		pr_err("nomount: failed to duplicate path string\n");
 		kfree(new_entry);
 		return -ENOMEM;
 	}
@@ -331,6 +261,7 @@ int nomount_umount_add(const char *path, unsigned int flags)
 
 	/* Double-check existence while holding the lock to avoid race conditions (TOCTOU) */
 	if (__nomount_umount_path_exists_locked(path)) {
+		pr_info("nomount: Path already in umount list, skipping add: %s\n", path);
 		up_write(&nomount_mount_list_lock);
 		kfree(path_copy);
 		kfree(new_entry);
@@ -353,8 +284,10 @@ int nomount_umount_del(const char *path)
 	struct mount_entry *entry, *tmp;
 	int found = 0;
 
-	if (!path)
+	if (!path) {
+		pr_err("nomount: umount_del called with NULL path\n");
 		return -EINVAL;
+	}
 
 	down_write(&nomount_mount_list_lock);
 	list_for_each_entry_safe(entry, tmp, &nomount_mount_list, list) {
@@ -363,6 +296,7 @@ int nomount_umount_del(const char *path)
 			kfree(entry->umountable);
 			kfree(entry);
 			found++;
+			pr_info("nomount: REMOVED from umount list: %s\n", path);
 		}
 	}
 	up_write(&nomount_mount_list_lock);
@@ -384,10 +318,11 @@ int nomount_umount_wipe(void)
 		kfree(entry->umountable);
 		kfree(entry);
 		count++;
+		pr_info("nomount: WIPED from umount list: %s\n", entry->umountable);
 	}
 	up_write(&nomount_mount_list_lock);
 
-	return 0;
+	return count ? 0 : -ENOENT;
 }
 
 /*
