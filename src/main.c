@@ -41,7 +41,7 @@ static int __init init_nomount_fs(void)
 	int err;
 
 	pr_info("NoMountFS: Registering filesystem...\n");
-#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
+#ifdef NOMOUNT_FS_KERNEL_UMOUNT
 	nmfs_cred = prepare_creds();
 	if (!nmfs_cred) {
 		pr_err("nomount: prepare cred failed!\n");
@@ -72,7 +72,7 @@ static int __init init_nomount_fs(void)
 	if (err)
 		goto out_unregister_fs;
 
-#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
+#ifdef NOMOUNT_FS_KERNEL_UMOUNT
 	/* Initialize the tracepoint hooks for setresuid interception */
 	err = nomount_init_hooks();
 	if (err)
@@ -90,7 +90,7 @@ out_free_dentry_cache:
 	nomount_destroy_dentry_cache();
 out_free_inode_cache:
 	nomount_destroy_inode_cache();
-#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
+#ifdef NOMOUNT_FS_KERNEL_UMOUNT
 out_umount_exit:
 	nomount_kernel_umount_exit();
 #endif
@@ -102,7 +102,7 @@ static void __exit exit_nomount_fs(void)
 {
 	pr_info("NoMountFS: Unregistering filesystem...\n");
 
-#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
+#ifdef NOMOUNT_FS_KERNEL_UMOUNT
 	/* Unregister tracepoint hooks first to stop new interceptions safely */
 	nomount_exit_hooks();
 
@@ -114,7 +114,7 @@ static void __exit exit_nomount_fs(void)
 	nomount_destroy_dirent_cache();
 	nomount_destroy_dentry_cache();
 	nomount_destroy_inode_cache();
-#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
+#ifdef NOMOUNT_FS_KERNEL_UMOUNT
 	nomount_kernel_umount_exit();
 #endif
 }

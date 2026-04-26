@@ -131,7 +131,7 @@ int new_dentry_private_data(struct dentry *dentry)
 	return 0;
 }
 
-#ifdef CONFIG_NOMOUNT_RCU_PATH_ACCESS
+#ifdef NOMOUNT_RCU_PATH_ACCESS
 static void nomount_dentry_rcu_free(struct rcu_head *head)
 {
 	struct nomount_dentry_info *info = container_of(head, struct nomount_dentry_info, rcu);
@@ -159,7 +159,7 @@ void free_dentry_private_data(struct dentry *dentry)
 		rcu_assign_pointer(dentry->d_fsdata, NULL);
 		spin_unlock(&dentry->d_lock);
 
-#ifdef CONFIG_NOMOUNT_RCU_PATH_ACCESS
+#ifdef NOMOUNT_RCU_PATH_ACCESS
 		/*
 		 * Use kfree_rcu() to defer freeing until all RCU readers complete.
 		 * The grace period ensures readers who already fetched the pointer

@@ -8,6 +8,15 @@ nomountfs-objs := main.o super.o inode.o file.o lookup.o dentry.o mmap.o
 
 ifeq ($(CONFIG_NOMOUNT_FS_KERNEL_UMOUNT), y)
 nomountfs-objs += nomount_umount.o tp_hook.o
+ccflags-y += -DNOMOUNT_FS_KERNEL_UMOUNT
+endif
+
+ifeq ($(CONFIG_NOMOUNT_FS_PROC), y)
+ccflags-y += -DNOMOUNT_FS_PROC
+endif
+
+ifeq ($(CONFIG_NOMOUNT_RCU_PATH_ACCESS), y)
+ccflags-y += -DNOMOUNT_RCU_PATH_ACCESS
 endif
 
 # Detect if clone_private_mount is exported by this kernel.

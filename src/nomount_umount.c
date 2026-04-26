@@ -429,7 +429,7 @@ int nomount_umount_list(char *buf, size_t buf_size)
 /*
  * Procfs interface for managing umount list from userspace
  */
-#ifdef CONFIG_NOMOUNT_FS_PROC
+#ifdef NOMOUNT_FS_PROC
 
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
@@ -724,7 +724,7 @@ void nomount_umount_proc_exit(void)
 	remove_proc_entry(NOMOUNT_PROC_UMOUNT, NULL);
 }
 
-#endif /* CONFIG_NOMOUNT_FS_PROC */
+#endif /* NOMOUNT_FS_PROC */
 
 /*
  * Initialize the kernel umount subsystem
@@ -733,7 +733,7 @@ void nomount_kernel_umount_init(void)
 {
 	INIT_LIST_HEAD(&nomount_mount_list);
 
-#ifdef CONFIG_NOMOUNT_FS_PROC
+#ifdef NOMOUNT_FS_PROC
 	nomount_umount_proc_init();
 #endif
 }
@@ -743,7 +743,7 @@ void nomount_kernel_umount_init(void)
  */
 void nomount_kernel_umount_exit(void)
 {
-#ifdef CONFIG_NOMOUNT_FS_PROC
+#ifdef NOMOUNT_FS_PROC
 	nomount_umount_proc_exit();
 #endif
 

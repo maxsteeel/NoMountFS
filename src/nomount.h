@@ -25,7 +25,7 @@
 #include <linux/xattr.h>
 #include <linux/exportfs.h>
 #include <linux/rcupdate.h>
-#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
+#ifdef NOMOUNT_FS_KERNEL_UMOUNT
 /* Include kernel umount support */
 #include "nomount_umount.h"
 #endif
@@ -58,7 +58,7 @@ extern const struct export_operations nomount_export_ops;
 extern const struct xattr_handler *nomount_xattr_handlers[];
 
 /* Cache and lifecycle management functions */
-#ifdef CONFIG_NOMOUNT_FS_KERNEL_UMOUNT
+#ifdef NOMOUNT_FS_KERNEL_UMOUNT
 void setup_nmfs_cred(void);
 extern struct cred *nmfs_cred;
 #endif
@@ -128,7 +128,7 @@ struct nomount_inode_info {
 
 /* Nomountfs dentry data in memory */
 struct nomount_dentry_info {
-#ifdef CONFIG_NOMOUNT_RCU_PATH_ACCESS
+#ifdef NOMOUNT_RCU_PATH_ACCESS
 	struct rcu_head rcu;	/* For kfree_rcu() deferred freeing */
 #endif
 	spinlock_t lock;	/* Protects lower_paths (write side only) */
@@ -198,7 +198,7 @@ static inline void pathcpy(struct path *dst, const struct path *src)
 }
 
 /* Safely retrieve the lower path while holding the dentry lock */
-#ifdef CONFIG_NOMOUNT_RCU_PATH_ACCESS
+#ifdef NOMOUNT_RCU_PATH_ACCESS
 /*
  * RCU version: no spinlock needed for readers.
  *

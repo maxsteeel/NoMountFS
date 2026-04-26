@@ -44,7 +44,7 @@ void nomount_kernel_umount_exit(void);
 int nmfs_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
 
 /* Procfs interface functions */
-#ifdef CONFIG_NOMOUNT_FS_PROC
+#ifdef NOMOUNT_FS_PROC
 int nomount_umount_proc_init(void);
 void nomount_umount_proc_exit(void);
 #else
