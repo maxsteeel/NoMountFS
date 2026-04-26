@@ -200,6 +200,15 @@ int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
 		return 0;
 	}
 
+	/* Fast path: Check if the list is empty without locking.
+	 * list_empty is safe to call locklessly as it just compares pointers.
+	 * Since umount entries are rarely added/removed during normal operation,
+	 * this saves expensive override_creds and down_read calls.
+	 */
+	if (list_empty(&nomount_mount_list)) {
+		return 0;
+	}
+
 	nw = kzalloc(sizeof(*nw), GFP_ATOMIC);
 	if (!nw) return 0;
 

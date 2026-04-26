@@ -1,41 +1,49 @@
 /*
- *NoMountFS: Dentry operations
- *Managing path name cache.
+ * NoMountFS: Dentry operations
+ * Managing path name cache.
  */
 
 #include "nomount.h"
 #include "compat.h"
 
-/* *nomount_d_revalidate: checks if our cached dentry is still valid 
- *compared to the real one on disk.
+/* nomount_d_revalidate: checks if our cached dentry is still valid 
+ * compared to the real one on disk.
  */
 static int nomount_d_revalidate(struct dentry *dentry, unsigned int flags)
 {
-	struct path lower_path;
 	struct dentry *lower_dentry;
+	struct nomount_dentry_info *info;
 	int valid = 1;
 
-	if (flags & LOOKUP_RCU)
+	/* We read the private data directly using RCU semantics.
+	 * No path_get/path_put means no atomic operations.
+	 */
+	rcu_read_lock();
+	info = rcu_dereference(dentry->d_fsdata);
+	if (unlikely(!info || !info->lower_paths[0].dentry)) {
+		rcu_read_unlock();
 		return -ECHILD;
-
-	nomount_get_lower_path(dentry, &lower_path);
-	lower_dentry = lower_path.dentry;
+	}
+	lower_dentry = info->lower_paths[0].dentry;
+	rcu_read_unlock();
 
 	/* If the lower filesystem dentry has its own revalidate, call it */
-	if (lower_dentry->d_op && lower_dentry->d_op->d_revalidate)
+	if (lower_dentry->d_op && lower_dentry->d_op->d_revalidate) {
 		valid = lower_dentry->d_op->d_revalidate(lower_dentry, flags);
+		if (unlikely(valid <= 0))
+			return valid;
+	}
 
 	/* Check if the lower inode has changed unexpectedly */
-	if (d_really_is_positive(dentry) && d_really_is_positive(lower_dentry)) {
-		if (d_inode(dentry)->i_ino != d_inode(lower_dentry)->i_ino)
+	if (likely(d_really_is_positive(dentry) && d_really_is_positive(lower_dentry))) {
+		if (unlikely(d_inode(dentry)->i_ino != d_inode(lower_dentry)->i_ino))
 			valid = 0;
 	}
 
-	nomount_put_lower_path(dentry, &lower_path);
 	return valid;
 }
 
-/* *nomount_d_release: cleanup when a dentry is destroyed.
+/* nomount_d_release: cleanup when a dentry is destroyed.
  */
 static void nomount_d_release(struct dentry *dentry)
 {
@@ -47,31 +55,28 @@ static struct dentry *nomount_d_real(struct dentry *dentry,
 				     const struct inode *inode)
 {
 	struct dentry *lower_dentry;
-	struct path lower_path;
-	struct dentry *real_dentry;
+	struct nomount_dentry_info *info;
 
-	if (inode && d_inode(dentry) == inode)
+	if (likely(inode && d_inode(dentry) == inode))
 		return dentry;
 
-	nomount_get_lower_path(dentry, &lower_path);
-	lower_dentry = lower_path.dentry;
+	info = rcu_access_pointer(dentry->d_fsdata);
+	if (unlikely(!info || !info->lower_paths[0].dentry))
+		return dentry;
 
-	if (lower_dentry && lower_dentry->d_op && lower_dentry->d_op->d_real) {
-		real_dentry = lower_dentry->d_op->d_real(lower_dentry, inode);
-	} else {
-		real_dentry = lower_dentry;
-	}
+	lower_dentry = info->lower_paths[0].dentry;
 
-	nomount_put_lower_path(dentry, &lower_path);
-	return real_dentry;
+	if (lower_dentry->d_op && lower_dentry->d_op->d_real)
+		return lower_dentry->d_op->d_real(lower_dentry, inode);
+
+	return lower_dentry;
 }
 
-/* *nomount_d_delete: Decides if a dentry should be cached when its refcount hits 0.
+/* nomount_d_delete: Decides if a dentry should be cached when its refcount hits 0.
  */
 static int nomount_d_delete(const struct dentry *dentry)
 {
-	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
-	int num_lower_paths;
+	struct nomount_dentry_info *info;
 	struct dentry *lower_dentry;
 	int err = 0;
 
@@ -80,27 +85,23 @@ static int nomount_d_delete(const struct dentry *dentry)
 	 * This is RCU-safe without needing rcu_read_lock() because
 	 * we're only checking for NULL, not dereferencing.
 	 */
-	if (!rcu_access_pointer(dentry->d_fsdata))
+	info = rcu_access_pointer(dentry->d_fsdata);
+	if (unlikely(!info))
 		return 1;
 
-	num_lower_paths = nomount_get_all_lower_paths(dentry, lower_paths);
-	
-	if (num_lower_paths > 0) {
-		lower_dentry = lower_paths[0].dentry; /* Topmost logic */
+	/* Optimize for topmost branch (layer 0) without allocating arrays */
+	lower_dentry = info->lower_paths[0].dentry;
 
-		if (lower_dentry) {
-			/* If the original dentry is no longer cached (was deleted/moved),
-			 * we must also disappear from the cache.
-			 */
-			if (d_unhashed(lower_dentry))
-				err = 1;
-
-			else if (lower_dentry->d_op && lower_dentry->d_op->d_delete)
-				err = lower_dentry->d_op->d_delete(lower_dentry);
-		}
+	if (likely(lower_dentry)) {
+		/* If the original dentry is no longer cached (was deleted/moved),
+		 * we must also disappear from the cache.
+		 */
+		if (unlikely(d_unhashed(lower_dentry)))
+			err = 1;
+		else if (lower_dentry->d_op && lower_dentry->d_op->d_delete)
+			err = lower_dentry->d_op->d_delete(lower_dentry);
 	}
 
-	nomount_put_all_lower_paths(dentry, lower_paths, num_lower_paths);
 	return err;
 }
 
@@ -144,7 +145,7 @@ void free_dentry_private_data(struct dentry *dentry)
     struct nomount_dentry_info *info = NOMOUNT_D(dentry);
 	int i;
 
-    if (info) {
+    if (likely(info)) {
 		for (i = 0; i < info->num_lower_paths; i++) {
 			if (info->lower_paths[i].dentry) {
 				path_put(&info->lower_paths[i]);

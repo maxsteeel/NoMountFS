@@ -54,8 +54,7 @@ static void nomount_evict_inode(struct inode *inode)
 	list_for_each_entry_safe(nd, tmp, &nii->dirents_list, list) {
 		hash_del(&nd->hash);
 		list_del(&nd->list);
-		kfree(nd->name);
-		kmem_cache_free(nomount_dirent_cachep, nd);
+		kfree(nd);
 	}
 	mutex_unlock(&nii->readdir_mutex);
 
@@ -75,7 +74,7 @@ static struct inode *nomount_alloc_inode(struct super_block *sb)
 	struct nomount_inode_info *i;
 
 	i = kmem_cache_alloc(nomount_inode_cachep, GFP_KERNEL);
-	if (!i)
+	if (unlikely(!i))
 		return NULL;
 
 	/* Initialize private data and VFS inode */
@@ -688,9 +687,13 @@ static void init_once(void *obj)
 
 int nomount_init_inode_cache(void)
 {
+	/* SLAB_HWCACHE_ALIGN: Aligns objects to the CPU's L1/L2 cache lines.
+	 * SLAB_MEM_SPREAD: Avoid concentrating memory on a single node.
+	 * This makes bulk inode allocations more fast.
+	 */
 	nomount_inode_cachep = kmem_cache_create("nomount_inode_cache",
 				sizeof(struct nomount_inode_info), 0,
-				SLAB_RECLAIM_ACCOUNT, init_once);
+				SLAB_RECLAIM_ACCOUNT | SLAB_HWCACHE_ALIGN | SLAB_MEM_SPREAD, init_once);
 	return nomount_inode_cachep ? 0 : -ENOMEM;
 }
 

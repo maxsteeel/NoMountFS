@@ -41,7 +41,7 @@
 #define NOMOUNT_FS_MAGIC 0xF18F
 
 /* Max number of stacked directories */
-#define NOMOUNT_MAX_BRANCHES 5
+#define NOMOUNT_MAX_BRANCHES 10
 
 /* Operations vectors defined in specific files */
 extern struct file_system_type nomount_fs_type;
@@ -65,7 +65,6 @@ extern struct cred *nmfs_cred;
 extern int nomount_init_inode_cache(void);
 extern void nomount_destroy_inode_cache(void);
 extern struct kmem_cache *nomount_dentry_cachep;
-extern struct kmem_cache *nomount_dirent_cachep;
 extern int nomount_init_dentry_cache(void);
 extern void nomount_destroy_dentry_cache(void);
 extern int nomount_init_dirent_cache(void);
