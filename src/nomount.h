@@ -108,7 +108,6 @@ struct nomount_dirent {
 struct nomount_file_info {
 	struct file *lower_files[NOMOUNT_MAX_BRANCHES];
 	int num_lower_files;
-	const struct vm_operations_struct *lower_vm_ops;
 	bool ghost_emitted;
 };
 
