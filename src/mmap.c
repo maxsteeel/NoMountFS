@@ -26,7 +26,6 @@ const struct address_space_operations nomount_aops = {
  */
 int nomount_mmap(struct file *file, struct vm_area_struct *vma)
 {
-	int err;
 	struct file *lower_file = nomount_lower_file(file);
 
 	if (!lower_file->f_op->mmap)
@@ -43,10 +42,5 @@ int nomount_mmap(struct file *file, struct vm_area_struct *vma)
 	vma->vm_file = get_file(lower_file);
 
 	/* Call the lower filesystem's mmap natively */
-	err = lower_file->f_op->mmap(lower_file, vma);
-
-	/* (Optional but safe) Re-assert address space operations for VFS */
-	file->f_mapping->a_ops = &nomount_aops;
-
-	return err;
+	return lower_file->f_op->mmap(lower_file, vma);
 }

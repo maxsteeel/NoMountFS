@@ -7,6 +7,22 @@
 #include "compat.h"
 #include <linux/uio.h>
 
+struct kmem_cache *nomount_dirent_cachep;
+
+int nomount_init_dirent_cache(void)
+{
+	nomount_dirent_cachep = kmem_cache_create("nomount_dirent_cache",
+				sizeof(struct nomount_dirent), 0,
+				SLAB_RECLAIM_ACCOUNT | SLAB_MEM_SPREAD, NULL);
+	return nomount_dirent_cachep ? 0 : -ENOMEM;
+}
+
+void nomount_destroy_dirent_cache(void)
+{
+	if (nomount_dirent_cachep)
+		kmem_cache_destroy(nomount_dirent_cachep);
+}
+
 /* * nomount_open: called when a file is being opened.
  * We must open the lower file and store its reference.
  */
@@ -20,8 +36,8 @@ static int nomount_open(struct inode *inode, struct file *file)
 	int i;
 
 	/* Allocate private storage for lower file reference */
-	info = kzalloc(sizeof(struct nomount_file_info), GFP_KERNEL);
-	if (!info)
+	info = kmem_cache_alloc(nomount_dirent_cachep, GFP_KERNEL);
+	if (unlikely(!info))
 		return -ENOMEM;
  
 	info->ghost_emitted = false;
@@ -55,18 +71,18 @@ static int nomount_open(struct inode *inode, struct file *file)
 	}
 
 	if (err && info->num_lower_files == 0) {
-		kfree(info);
+		kmem_cache_free(nomount_dirent_cachep, info);
 		return err;
 	} else if (err) {
 		/* Failed partway through opening directories; close what we opened */
 		for (i = 0; i < info->num_lower_files; i++) {
 			fput(info->lower_files[i]);
 		}
-		kfree(info);
+		kmem_cache_free(nomount_dirent_cachep, info);
 		return err;
 	} else if (info->num_lower_files == 0) {
 		/* No files were opened — this is an error */
-		kfree(info);
+		kmem_cache_free(nomount_dirent_cachep, info);
 		return -ENOENT;
 	} else {
 		file->private_data = info;
@@ -89,7 +105,7 @@ static int nomount_release(struct inode *inode, struct file *file)
 			}
 		}
 		
-		kfree(info);
+		kmem_cache_free(nomount_dirent_cachep, info);
 		file->private_data = NULL;
 	}
 	return 0;
@@ -99,17 +115,13 @@ static int nomount_release(struct inode *inode, struct file *file)
  */
 static long nomount_unlocked_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
-    struct file *lower_file = nomount_lower_file(file);
-    long err = -ENOTTY;
+	struct file *lower_file = nomount_lower_file(file);
+	long err = -ENOTTY;
 
-    if (lower_file->f_op && lower_file->f_op->unlocked_ioctl)
-        err = lower_file->f_op->unlocked_ioctl(lower_file, cmd, arg);
+	if (lower_file->f_op && lower_file->f_op->unlocked_ioctl)
+		err = lower_file->f_op->unlocked_ioctl(lower_file, cmd, arg);
 
-    /* If ioctl changed size/attributes, sync them back */ 
-    if (!err)
-        fsstack_copy_attr_all(file_inode(file), file_inode(lower_file));
-
-    return err;
+	return err;
 }
 
 #ifdef CONFIG_COMPAT
@@ -131,74 +143,50 @@ static long nomount_compat_ioctl(struct file *file, unsigned int cmd, unsigned l
 
 static int nomount_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
-    struct file *lower_file = nomount_lower_file(file);
-    struct dentry *dentry = file->f_path.dentry;
-    int err;
+	struct file *lower_file = nomount_lower_file(file);
+	int err;
 
-    err = __generic_file_fsync(file, start, end, datasync);
-    if (err) return err;
+	err = __generic_file_fsync(file, start, end, datasync);
+	if (err) return err;
 
-    err = vfs_fsync_range(lower_file, start, end, datasync);
-
-    if (!err)
-        fsstack_copy_attr_all(d_inode(dentry), file_inode(lower_file));
-
-    return err;
+	return vfs_fsync_range(lower_file, start, end, datasync);
 }
 
 static int nomount_flush(struct file *file, fl_owner_t id)
 {
-    struct file *lower_file = nomount_lower_file(file);
-    if (lower_file && lower_file->f_op && lower_file->f_op->flush)
-        return lower_file->f_op->flush(lower_file, id);
-    return 0;
+	struct file *lower_file = nomount_lower_file(file);
+	if (lower_file && lower_file->f_op && lower_file->f_op->flush)
+		return lower_file->f_op->flush(lower_file, id);
+	return 0;
 }
 
 static int nomount_fasync(int fd, struct file *file, int flag)
 {
-    struct file *lower_file = nomount_lower_file(file);
-    if (lower_file->f_op && lower_file->f_op->fasync)
-        return lower_file->f_op->fasync(fd, lower_file, flag);
-    return 0;
+	struct file *lower_file = nomount_lower_file(file);
+	if (lower_file->f_op && lower_file->f_op->fasync)
+		return lower_file->f_op->fasync(fd, lower_file, flag);
+	return 0;
 }
 
 #ifdef HAVE_LEGACY_IO
 /* * nomount_read: The old read for Kernel < 3.16.
  */
 static ssize_t nomount_read(struct file *file, char __user *buf,
-			   size_t count, loff_t *ppos)
+			    size_t count, loff_t *ppos)
 {
-	ssize_t err;
-	struct file *lower_file = nomount_lower_file(file);
-	struct dentry *dentry = file->f_path.dentry;
-
-	/* Forward read to the lower filesystem */
-	err = vfs_read(lower_file, buf, count, ppos);
-
-	/* Update virtual inode access time from lower inode */
-	if (err >= 0)
-		fsstack_copy_attr_atime(d_inode(dentry), file_inode(lower_file));
-
-	return err;
+	/* * Forward read to the lower filesystem.
+	 * We intentionally omit fsstack_copy_attr_atime.
+	 * Updating metadata on every read chunk thrashes the CPU cache.
+	 * getattr() will fetch the correct times directly from disk when requested.
+	 */
+	return vfs_read(nomount_lower_file(file), buf, count, ppos);
 }
 
 static ssize_t nomount_write(struct file *file, const char __user *buf,
-			    size_t count, loff_t *ppos)
+			     size_t count, loff_t *ppos)
 {
-	ssize_t err;
-	struct file *lower_file = nomount_lower_file(file);
-	struct dentry *dentry = file->f_path.dentry;
-
 	/* Forward write to the lower filesystem */
-	err = vfs_write(lower_file, buf, count, ppos);
-
-	/* Copy inode size and times so VFS doesn't detect inconsistencies */
-	if (err >= 0) {
-		fsstack_copy_inode_size(d_inode(dentry), file_inode(lower_file));
-		fsstack_copy_attr_times(d_inode(dentry), file_inode(lower_file));
-	}
-
-	return err;
+	return vfs_write(nomount_lower_file(file), buf, count, ppos);
 }
 #else
 /* * nomount_read_iter: modern read interface.
@@ -210,7 +198,7 @@ static ssize_t nomount_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	struct file *lower_file = nomount_lower_file(file);
 	struct file *saved_filp;
 
-	if (!lower_file->f_op->read_iter)
+	if (unlikely(!lower_file->f_op->read_iter))
 		return -EINVAL;
 
 	/* Temporarily switch the control block's file context */
@@ -222,10 +210,7 @@ static ssize_t nomount_read_iter(struct kiocb *iocb, struct iov_iter *iter)
 	/* Restore the original file context */
 	iocb->ki_filp = saved_filp;
 
-	/* Update times if read succeeded */
-	if (err >= 0 || err == -EIOCBQUEUED)
-		fsstack_copy_attr_atime(d_inode(file->f_path.dentry), file_inode(lower_file));
-
+	/* Metadata sync removed */
 	return err;
 }
 
@@ -236,7 +221,7 @@ static ssize_t nomount_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	struct file *lower_file = nomount_lower_file(file);
 	struct file *saved_filp;
 
-	if (!lower_file->f_op->write_iter)
+	if (unlikely(!lower_file->f_op->write_iter))
 		return -EINVAL;
 
 	/* Temporarily switch the control block's file context */
@@ -248,23 +233,18 @@ static ssize_t nomount_write_iter(struct kiocb *iocb, struct iov_iter *iter)
 	/* Restore the original file context */
 	iocb->ki_filp = saved_filp;
 
-	/* Sync size and times after write */
-	if (err >= 0 || err == -EIOCBQUEUED) {
-		fsstack_copy_inode_size(d_inode(file->f_path.dentry), file_inode(lower_file));
-		fsstack_copy_attr_times(d_inode(file->f_path.dentry), file_inode(lower_file));
-	}
-
+	/* * The Linux VFS naturally handles the i_size update of the upper 
+	 * virtual inode during write calls. Manual fsstack_copy is redundant.
+	 */
 	return err;
 }
 #endif
 
 struct nomount_readdir_data {
     struct dir_context ctx;
-    struct dir_context *orig_ctx;
     struct nomount_sb_info *sbi;
     struct nomount_file_info *nfi;
 	struct nomount_inode_info *nii;
-	int branch_idx;
 };
 
 /* * nomount_filldir_cache: Fills the in-memory cache of directories.
@@ -289,8 +269,8 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
 	}
 
     /* Check if this is the entry we are targeting for injection */
-    if (unlikely(sbi->has_inject && namelen == sbi->inject_name_len &&
-        memcmp(name, sbi->inject_name, namelen) == 0)) {
+    if (unlikely(sbi->has_inject && hash_val == sbi->inject_name_hash && 
+	namelen == sbi->inject_name_len && memcmp(name, sbi->inject_name, namelen) == 0)) {
         
         if (buf->nfi) {
             buf->nfi->ghost_emitted = true;
@@ -300,17 +280,11 @@ static int nomount_filldir_cache(struct dir_context *ctx, const char *name, int 
         d_type = DT_REG; 
     }
 
-	/* Allocation in a single block.
-     * Total size is calculated: struct + name length + null terminator.
-     * Native kzalloc is then used to allocate the entire memory block, 
-	 * which improves efficiency and reduces fragmentation.
-     */
-    nd = kzalloc(sizeof(struct nomount_dirent) + namelen + 1, GFP_KERNEL);
+	/* Allocation from the kmem_cache for improved performance */
+	nd = kmem_cache_zalloc(nomount_dirent_cachep, GFP_KERNEL);
     if (unlikely(!nd))
         return -ENOMEM;
 
-	/* The name now lives right after the structure in memory */
-    nd->name = (char *)(nd + 1);
     memcpy(nd->name, name, namelen);
     nd->name[namelen] = '\0';
 
@@ -337,17 +311,36 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 	struct nomount_dirent *nd, *tmp;
 	u64 current_version = 0;
 
-	mutex_lock(&nii->readdir_mutex);
+        if (nfi->num_lower_files == 1 && (!is_root || !sbi->has_inject)) {
+		struct file *lower_file = nfi->lower_files[0];
 
-	/* Check invalidation based on lower files versions/mtimes */
-	for (i = 0; i < nfi->num_lower_files; i++) {
-		struct inode *lower_inode = file_inode(nfi->lower_files[i]);
-		current_version += nomount_get_mtime(lower_inode);
-		current_version += nomount_query_iversion(lower_inode);
+		/* Align physical file position with virtual context */
+		lower_file->f_pos = ctx->pos;
+#ifdef HAVE_ITERATE_SHARED
+		err = iterate_dir(lower_file, ctx);
+#else
+		if (!lower_file->f_op->iterate)
+			return -ENOTDIR;
+		err = lower_file->f_op->iterate(lower_file, ctx);
+#endif
+		/* Sync virtual position back */
+		file->f_pos = ctx->pos;
+		return err;
 	}
 
-	if (nii->cache_populated && nii->cache_version != current_version) {
-		nii->cache_populated = false; /* Invalidate */
+	mutex_lock(&nii->readdir_mutex);
+
+        if (ctx->pos == 0) {
+	        /* Check invalidation based on lower files versions/mtimes */
+	        for (i = 0; i < nfi->num_lower_files; i++) {
+		        struct inode *lower_inode = file_inode(nfi->lower_files[i]);
+		        current_version += nomount_get_mtime(lower_inode);
+		        current_version += nomount_query_iversion(lower_inode);
+	        }
+
+	        if (nii->cache_populated && nii->cache_version != current_version) {
+		        nii->cache_populated = false; /* Invalidate */
+	        }
 	}
 
 	/* * Populate cache if starting from the beginning.
@@ -372,11 +365,9 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 			lower_file->f_pos = 0; /* Always scan full directory from start */
 			buf.ctx.actor = nomount_filldir_cache;
 			buf.ctx.pos = 0;
-			buf.orig_ctx = ctx;
 			buf.sbi = sbi;
 			buf.nfi = nfi;
 			buf.nii = nii;
-			buf.branch_idx = i;
 
 #ifdef HAVE_ITERATE_SHARED
 			err = iterate_dir(lower_file, &buf.ctx);
@@ -394,11 +385,10 @@ int nomount_iterate(struct file *file, struct dir_context *ctx)
 		if (err >= 0 && is_root && sbi->has_inject && !nfi->ghost_emitted) {
 			u64 fake_ino = d_inode(sbi->inject_path.dentry)->i_ino;
 			
-			nd = kzalloc(sizeof(struct nomount_dirent) + sbi->inject_name_len + 1, GFP_KERNEL);
+			nd = kmalloc(sizeof(struct nomount_dirent) + sbi->inject_name_len + 1, GFP_KERNEL);
 			if (!nd) {
 				err = -ENOMEM;
 			} else {
-				nd->name = (char *)(nd + 1);
                 memcpy(nd->name, sbi->inject_name, sbi->inject_name_len);
                 nd->name[sbi->inject_name_len] = '\0';
 				
@@ -515,3 +505,4 @@ const struct file_operations nomount_dir_fops = {
 	.readdir	= nomount_readdir,
 #endif
 };
+

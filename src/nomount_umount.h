@@ -36,12 +36,35 @@ extern struct rw_semaphore nomount_mount_list_lock;
 /* Feature control */
 extern bool nomount_kernel_umount_enabled;
 
+/* UID range constants */
+#define PER_USER_RANGE 100000
+#define FIRST_APPLICATION_UID 10000
+#define LAST_APPLICATION_UID 19999
+#define FIRST_ISOLATED_UID 99000
+#define LAST_ISOLATED_UID 99999
+
+static inline bool is_appuid(uid_t uid)
+{
+	uid_t appid = uid % PER_USER_RANGE;
+	return appid >= FIRST_APPLICATION_UID && appid <= LAST_APPLICATION_UID;
+}
+
+/*
+ * Check if uid is an isolated process UID
+ */
+static inline bool is_isolated_process(uid_t uid)
+{
+	uid_t appid = uid % PER_USER_RANGE;
+	return appid >= FIRST_ISOLATED_UID && appid <= LAST_ISOLATED_UID;
+}
+
 /* Initialization and cleanup */
 void nomount_kernel_umount_init(void);
 void nomount_kernel_umount_exit(void);
 
 /* Main umount handler - called from setuid/setresuid hooks */
-int nmfs_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
+void nmfs_handle_umount(uid_t old_uid, uid_t new_uid);
+void nmfs_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
 
 /* Procfs interface functions */
 #ifdef NOMOUNT_FS_PROC
@@ -56,12 +79,8 @@ static inline void nomount_umount_proc_exit(void) { }
 int nomount_umount_add(const char *path, unsigned int flags);
 int nomount_umount_del(const char *path);
 int nomount_umount_wipe(void);
-int nomount_umount_list(char *buf, size_t buf_size);
 
 /* Helper to check if uid should trigger umount */
 bool nomount_uid_should_umount(uid_t uid);
-
-/* Check if path is already in umount list */
-bool nomount_umount_path_exists(const char *path);
 
 #endif /* __NOMOUNT_UMOUNT_H__ */

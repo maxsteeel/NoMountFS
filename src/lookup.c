@@ -6,6 +6,7 @@
 #include "compat.h"
 
 struct kmem_cache *nomount_dentry_cachep;
+extern struct dentry *lookup_one_len_unlocked(const char *name, struct dentry *base, int len);
 
 /* * Inode Cache: Handles the mapping between virtual and real inodes.
  */
@@ -120,49 +121,43 @@ struct dentry *__nomount_interpose(struct dentry *dentry,
 struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 			     unsigned int flags)
 {
-	struct dentry *ret, *parent, *lower_dentry;
-	struct path lower_parent_paths[NOMOUNT_MAX_BRANCHES];
+	struct dentry *ret, *lower_dentry;
+	struct nomount_dentry_info *parent_info;
 	struct path found_paths[NOMOUNT_MAX_BRANCHES];
-	int num_lower_parent_paths;
 	int num_found_paths = 0;
 	struct nomount_sb_info *sbi;
-	struct qstr name;
-	int err;
-	int i;
-	bool is_dir = false;
-
-	parent = dget_parent(dentry);
-	if (!parent) {
-		return ERR_PTR(-ENOENT);
-	}
-	num_lower_parent_paths = nomount_get_all_lower_paths(parent, lower_parent_paths);
+	struct qstr name = dentry->d_name;
+	int err, i;
 
 	/* Allocate private data for the dentry info */
 	err = new_dentry_private_data(dentry);
 	if (err) {
-		ret = ERR_PTR(err);
-		goto out_put_parent;
+		return ERR_PTR(err);
 	}
 
-	name = dentry->d_name;
 	/* Get the superblock info from the dentry's superblock, not allocate new */
 	sbi = NOMOUNT_SB(dentry->d_sb);
 
-	if (sbi && sbi->has_inject && name.len == sbi->inject_name_len &&
-		memcmp(name.name, sbi->inject_name, name.len) == 0) {
+	if (unlikely(sbi && sbi->has_inject && name.hash == sbi->inject_name_hash && 
+	      name.len == sbi->inject_name_len && memcmp(name.name, sbi->inject_name, name.len) == 0)) {
 		pathcpy(&found_paths[0], &sbi->inject_path);
 		path_get(&found_paths[0]);
 		lower_dentry = found_paths[0].dentry;
 		num_found_paths = 1;
 	} else {
+	        /*
+		 * The VFS already locked the parent directory (dir->i_rwsem) before 
+		 * calling lookup. This guarantees dentry->d_parent and its d_fsdata 
+		 * are 100% stable. We read the raw pointer directly, bypassing 
+		 * dget_parent() and atomic path_get() loops entirely.
+		 */
+		parent_info = rcu_dereference_raw(dentry->d_parent->d_fsdata);
 		struct path first_negative_path = { .dentry = NULL, .mnt = NULL };
 
-		for (i = 0; i < num_lower_parent_paths; i++) {
+		for (i = 0; i < parent_info->num_lower_paths; i++) {
 			struct path lower_path;
 
-			inode_lock_nested(d_inode(lower_parent_paths[i].dentry), I_MUTEX_PARENT);
-			lower_dentry = lookup_one_len(name.name, lower_parent_paths[i].dentry, name.len);
-			inode_unlock(d_inode(lower_parent_paths[i].dentry));
+			lower_dentry = lookup_one_len_unlocked(name.name, parent_info->lower_paths[i].dentry, name.len);
 
 			if (IS_ERR(lower_dentry)) {
 				continue;
@@ -178,10 +173,12 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 			 * dentry and the vfsmount atomically.
 			 */
 			lower_path.dentry = lower_dentry;
-			lower_path.mnt = mntget(lower_parent_paths[i].mnt);
+			/* We still mntget because follow_down modifies the mount reference */
+			lower_path.mnt = mntget(parent_info->lower_paths[i].mnt);
 			err = follow_down(&lower_path);
 			if (err < 0) {
-				/* follow_down failed — clean up and continue to next layer */
+				/* follow_down failed — clean up and continue to next layer
+				 * path_put releases BOTH mnt and dentry */
 				path_put(&lower_path);
 				dput(lower_dentry);
 				continue;
@@ -195,10 +192,7 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 				num_found_paths++;
 
 				if (!S_ISDIR(d_inode(lower_dentry)->i_mode)) {
-					is_dir = false;
 					break; /* Shadowing: top file hides lower files/dirs */
-				} else {
-					is_dir = true;
 				}
 			} else {
 				/* It's negative. Save the first one (from layer 0) for creations */
@@ -242,23 +236,16 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 			 * again. Jump directly to parent cleanup.
 			 */
 			free_dentry_private_data(dentry);
-			goto out_put_parent;
+			return ret; /* VFS inherently handles parent state */
 		}
 	}
 
-	/* Final metadata sync for the parent and current dentry */
-	if (!IS_ERR_OR_NULL(ret))
-		dentry = ret;
+	/*
+	 * We DO NOT sync atime/mtime for the dentry or the parent here.
+	 * Doing so forces cache invalidations multiple times per file open.
+	 * getattr() fetches accurate times directly from disk when stat is called.
+	 */
 
-	if (d_inode(dentry))
-		fsstack_copy_attr_times(d_inode(dentry), nomount_lower_inode(d_inode(dentry)));
-
-	if (d_inode(parent))
-		fsstack_copy_attr_atime(d_inode(parent), nomount_lower_inode(d_inode(parent)));
-
-out_put_parent:
-	nomount_put_all_lower_paths(parent, lower_parent_paths, num_lower_parent_paths);
-	dput(parent);
 	return ret;
 }
 

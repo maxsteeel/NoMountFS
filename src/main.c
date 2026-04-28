@@ -7,6 +7,8 @@
 
 #include <linux/module.h>
 
+struct cred *nmfs_cred = NULL;
+
 /* Function to handle the actual mounting process */
 static struct dentry *nomount_mount(struct file_system_type *fs_type,
 				  int flags, const char *dev_name,
@@ -17,7 +19,7 @@ static struct dentry *nomount_mount(struct file_system_type *fs_type,
 	 * it doesn't need a physical block device (like /dev/block/sda).
 	 */
 
-	/*  Wrap both arguments so as not to lose mount options (-o) */
+	/* Wrap both arguments so as not to lose mount options (-o) */
 	struct nomount_mount_data mdata = {
 		.dev_name = dev_name,
 		.raw_data = raw_data
@@ -41,37 +43,44 @@ static int __init init_nomount_fs(void)
 	int err;
 
 	pr_info("NoMountFS: Registering filesystem...\n");
-#ifdef NOMOUNT_FS_KERNEL_UMOUNT
+
+	/* 1. Allocate credentials */
 	nmfs_cred = prepare_creds();
 	if (!nmfs_cred) {
 		pr_err("nomount: prepare cred failed!\n");
+		return -ENOMEM;
 	}
-	setup_nmfs_cred();
 
-	/* Initialize the kernel umount subsystem */
+#ifdef NOMOUNT_FS_KERNEL_UMOUNT
+	/* 2. Initialize umount subsystem */
 	nomount_kernel_umount_init();
 #endif
 
-	/* Initialize the memory cache for our inodes */
+	/* 3. Initialize inode cache */
 	err = nomount_init_inode_cache();
 	if (err)
-		goto out_free_inode_cache;
+		goto out_umount_exit;
 
-	/* Initialize the memory cache for our dentries */
+	/* 4. Initialize dentry cache */
 	err = nomount_init_dentry_cache();
+	if (err)
+		goto out_free_inode_cache;
+		
+	/* 5. Initialize dirent cache */
+	err = nomount_init_dirent_cache();
 	if (err)
 		goto out_free_dentry_cache;
 
-	/* Register the filesystem in the VFS layer */
+	/* 6. Register the filesystem */
 	err = register_filesystem(&nomount_fs_type);
 	if (err)
-		goto out_unregister_fs;
+		goto out_free_dirent_cache;
 
 #ifdef NOMOUNT_FS_KERNEL_UMOUNT
-	/* Initialize the tracepoint hooks for setresuid interception */
+	/* 7. Initialize hooks */
 	err = nomount_init_hooks();
 	if (err)
-		goto out_umount_exit;
+		goto out_unregister_fs;
 #endif
 
 	pr_info("NoMountFS: Successfully registered.\n");
@@ -79,14 +88,20 @@ static int __init init_nomount_fs(void)
 
 out_unregister_fs:
 	unregister_filesystem(&nomount_fs_type);
+out_free_dirent_cache:
+	nomount_destroy_dirent_cache();
 out_free_dentry_cache:
 	nomount_destroy_dentry_cache();
 out_free_inode_cache:
 	nomount_destroy_inode_cache();
-#ifdef NOMOUNT_FS_KERNEL_UMOUNT
 out_umount_exit:
+#ifdef NOMOUNT_FS_KERNEL_UMOUNT
 	nomount_kernel_umount_exit();
 #endif
+	if (nmfs_cred) {
+		put_cred(nmfs_cred);
+		nmfs_cred = NULL;
+	}
 
 	return err;
 }
@@ -98,17 +113,23 @@ static void __exit exit_nomount_fs(void)
 #ifdef NOMOUNT_FS_KERNEL_UMOUNT
 	/* Unregister tracepoint hooks first to stop new interceptions safely */
 	nomount_exit_hooks();
-
-	if (nmfs_cred)
-		put_cred(nmfs_cred);
 #endif
-	
+
 	unregister_filesystem(&nomount_fs_type);
+	
+	/* Destroy caches only after VFS is unregistered and no one can use it */
+	nomount_destroy_dirent_cache();
 	nomount_destroy_dentry_cache();
 	nomount_destroy_inode_cache();
+
 #ifdef NOMOUNT_FS_KERNEL_UMOUNT
 	nomount_kernel_umount_exit();
 #endif
+
+	if (nmfs_cred) {
+		put_cred(nmfs_cred);
+		nmfs_cred = NULL;
+	}
 }
 
 MODULE_AUTHOR("Erez Zadok (WrapFS), maxsteeel (NoMountFS)");

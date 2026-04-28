@@ -29,38 +29,15 @@
 #include "nomount.h"
 #include "nomount_umount.h"
 
-struct cred *nmfs_cred = NULL;
 bool nomount_kernel_umount_enabled = true;
 
 /* Global umount list and lock */
 struct list_head nomount_mount_list = LIST_HEAD_INIT(nomount_mount_list);
 DECLARE_RWSEM(nomount_mount_list_lock);
 
-/* UID range constants */
-#define PER_USER_RANGE 100000
-#define FIRST_APPLICATION_UID 10000
-#define LAST_APPLICATION_UID 19999
-#define FIRST_ISOLATED_UID 99000
-#define LAST_ISOLATED_UID 99999
-
 struct nmfs_umount_work {
 	struct callback_head work;
 };
-
-static inline bool is_appuid(uid_t uid)
-{
-	uid_t appid = uid % PER_USER_RANGE;
-	return appid >= FIRST_APPLICATION_UID && appid <= LAST_APPLICATION_UID;
-}
-
-/*
- * Check if uid is an isolated process UID
- */
-static inline bool is_isolated_process(uid_t uid)
-{
-	uid_t appid = uid % PER_USER_RANGE;
-	return appid >= FIRST_ISOLATED_UID && appid <= LAST_ISOLATED_UID;
-}
 
 /*
  * Check if a uid should trigger umount
@@ -90,36 +67,6 @@ static bool __nomount_umount_path_exists_locked(const char *path)
 	}
 
 	return false;
-}
-
-/*
- * Check if a path already exists in the umount list
- */
-bool nomount_umount_path_exists(const char *path)
-{
-	bool found;
-
-	down_read(&nomount_mount_list_lock);
-	found = __nomount_umount_path_exists_locked(path);
-	up_read(&nomount_mount_list_lock);
-
-	return found;
-}
-
-/*
- * Replaced manual SELinux domain transitions with prepare_kernel_cred().
- * This dynamically allocates a credential struct with full root privileges 
- * (including CAP_SYS_ADMIN), satisfying VFS permission checks natively.
- */
-void setup_nmfs_cred(void)
-{
-	if (!nmfs_cred) {
-		/* prepare_kernel_cred(NULL) is a fully exported symbol */
-		nmfs_cred = prepare_kernel_cred(NULL);
-		if (!nmfs_cred) {
-			pr_err("nomount: failed to allocate kernel credentials\n");
-		}
-	}
 }
 
 static void try_umount(const char *mnt, int flags)
@@ -160,44 +107,40 @@ static void nmfs_do_umount_work(struct callback_head *work)
 	const struct cred *saved;
 	struct mount_entry *entry;
 
-	setup_nmfs_cred();
-	if (nmfs_cred) {
-		saved = override_creds(nmfs_cred);
+	saved = override_creds(nmfs_cred);
 
-		down_read(&nomount_mount_list_lock);
-		list_for_each_entry(entry, &nomount_mount_list, list) {
-			try_umount(entry->umountable, entry->flags);
-		}
-		up_read(&nomount_mount_list_lock);
-
-		revert_creds(saved);
+	down_read(&nomount_mount_list_lock);
+	list_for_each_entry(entry, &nomount_mount_list, list) {
+		try_umount(entry->umountable, entry->flags);
 	}
+	up_read(&nomount_mount_list_lock);
 
+	revert_creds(saved);
 	kfree(nw);
 }
 
-int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
+void nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
 {
 	struct nmfs_umount_work *nw;
 
 	if (!nomount_kernel_umount_enabled) {
-		pr_info("nomount: Kernel umount disabled, skipping umount handling.\n");
-		return 0;
+		pr_debug("nomount: Kernel umount disabled, skipping umount handling.\n");
+		return;
 	}
 
 	if (!is_appuid(new_uid) && !is_isolated_process(new_uid)) {
-		pr_info("nomount: New UID %u is not an app or isolated UID, skipping umount.\n", new_uid);
-		return 0;
+		pr_debug("nomount: New UID %u is not an app or isolated UID, skipping umount.\n", new_uid);
+		return;
 	}
 
 	if (!nomount_uid_should_umount(new_uid) && !is_isolated_process(new_uid)) {
-		pr_info("nomount: New UID %u does not require umount, skipping.\n", new_uid);
-		return 0;
+		pr_debug("nomount: New UID %u does not require umount, skipping.\n", new_uid);
+		return;
 	}
 
 	if (old_uid != 0) {
-		pr_info("nomount: Old UID %u is not root, skipping umount handling.\n", old_uid);
-		return 0;
+		pr_debug("nomount: Old UID %u is not root, skipping umount handling.\n", old_uid);
+		return;
 	}
 
 	/* Fast path: Check if the list is empty without locking.
@@ -206,11 +149,11 @@ int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
 	 * this saves expensive override_creds and down_read calls.
 	 */
 	if (list_empty(&nomount_mount_list)) {
-		return 0;
+		return;
 	}
 
 	nw = kzalloc(sizeof(*nw), GFP_ATOMIC);
-	if (!nw) return 0;
+	if (!nw) return;
 
 	init_task_work(&nw->work, nmfs_do_umount_work);
 
@@ -221,20 +164,20 @@ int nmfs_handle_umount(uid_t old_uid, uid_t new_uid)
 		pr_debug("nomount: App Launch Detected! Deferring umount work...\n");
 	}
 
-	return 0;
+	return;
 }
 
-int nmfs_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
+void nmfs_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid)
 {
 	uid_t new_uid = ruid;
 	uid_t old_uid = current_uid().val;
 
 	if (old_uid != 0)
-		return 0;
+		return;
 
 	nmfs_handle_umount(old_uid, new_uid);
 
-	return 0;
+	return;
 }
 
 /*
@@ -327,47 +270,10 @@ int nomount_umount_wipe(void)
 		kfree(entry->umountable);
 		kfree(entry);
 		count++;
-		pr_info("nomount: WIPED from umount list: %s\n", entry->umountable);
 	}
 	up_write(&nomount_mount_list_lock);
 
 	return count ? 0 : -ENOENT;
-}
-
-/*
- * List all entries in the umount list
- * Returns the number of bytes written to buf
- */
-int nomount_umount_list(char *buf, size_t buf_size)
-{
-	struct mount_entry *entry;
-	size_t offset = 0;
-	int count = 0;
-
-	if (!buf || buf_size == 0)
-		return -EINVAL;
-
-	/* Write header */
-	offset += snprintf(buf + offset, buf_size - offset,
-			   "Mount Point\tFlags\n");
-	offset += snprintf(buf + offset, buf_size - offset,
-			   "----------\t-----\n");
-
-	down_read(&nomount_mount_list_lock);
-	list_for_each_entry(entry, &nomount_mount_list, list) {
-		int written;
-
-		written = snprintf(buf + offset, buf_size - offset,
-				  "%s\t%u\n", entry->umountable, entry->flags);
-		if (written < 0 || written >= (int)(buf_size - offset)) {
-			break;
-		}
-		offset += written;
-		count++;
-	}
-	up_read(&nomount_mount_list_lock);
-
-	return offset;
 }
 
 /*

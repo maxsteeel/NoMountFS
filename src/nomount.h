@@ -23,6 +23,7 @@
 #include <linux/slab.h>
 #include <linux/sched.h>
 #include <linux/xattr.h>
+#include <linux/limits.h>
 #include <linux/exportfs.h>
 #include <linux/rcupdate.h>
 #ifdef NOMOUNT_FS_KERNEL_UMOUNT
@@ -41,7 +42,7 @@
 #define NOMOUNT_FS_MAGIC 0xF18F
 
 /* Max number of stacked directories */
-#define NOMOUNT_MAX_BRANCHES 10
+#define NOMOUNT_MAX_BRANCHES 5
 
 /* Operations vectors defined in specific files */
 extern struct file_system_type nomount_fs_type;
@@ -58,15 +59,13 @@ extern const struct export_operations nomount_export_ops;
 extern const struct xattr_handler *nomount_xattr_handlers[];
 
 /* Cache and lifecycle management functions */
-#ifdef NOMOUNT_FS_KERNEL_UMOUNT
-void setup_nmfs_cred(void);
 extern struct cred *nmfs_cred;
-#endif
 extern int nomount_init_inode_cache(void);
 extern void nomount_destroy_inode_cache(void);
 extern struct kmem_cache *nomount_dentry_cachep;
 extern int nomount_init_dentry_cache(void);
 extern void nomount_destroy_dentry_cache(void);
+extern struct kmem_cache *nomount_dirent_cachep;
 extern int nomount_init_dirent_cache(void);
 extern void nomount_destroy_dirent_cache(void);
 extern int new_dentry_private_data(struct dentry *dentry);
@@ -98,7 +97,7 @@ extern void nomount_exit_hooks(void);
 struct nomount_dirent {
 	struct hlist_node hash; /* For fast O(1) deduplication lookups */
 	struct list_head list;  /* For ordered O(1) emissions */
-	char *name;
+	char name[NAME_MAX + 1];
 	int len;
 	u64 ino;
 	unsigned int d_type;
@@ -113,15 +112,17 @@ struct nomount_file_info {
 
 /* Nomountfs inode data in memory */
 struct nomount_inode_info {
-	struct inode *lower_inode;
+	/* vfs_inode at Offset 0. */
 	struct inode vfs_inode;
+	struct inode *lower_inode;
 
-	/* For readdir deduplication (per-inode caching) */
-	DECLARE_HASHTABLE(dirent_hashtable, 8); /* 2^8 = 256 buckets */
-	struct list_head dirents_list;          /* Ordered emission list */
-	struct mutex readdir_mutex;
-	bool cache_populated;
+	/* Reordered strictly by alignment size to eliminate RAM padding */
 	u64 cache_version;
+	struct mutex readdir_mutex;
+	/* For readdir deduplication (per-inode caching) */
+	DECLARE_HASHTABLE(dirent_hashtable, 8);  /* 2^8 = 256 buckets */
+	struct list_head dirents_list;           /* Ordered emission list */
+	bool cache_populated;
 };
 
 /* Nomountfs dentry data in memory */
@@ -140,6 +141,7 @@ struct nomount_sb_info {
 	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
 	int num_lower_paths;
 	bool has_inject;
+	bool has_upperdir;
 	char inject_name[NAME_MAX]; /* Name of the file to intercept */
 	size_t inject_name_len;     /* Precomputed length of inject_name */
 	u32 inject_name_hash;       /* Precomputed hash of inject_name */
@@ -183,16 +185,14 @@ static inline struct inode *nomount_lower_inode(const struct inode *i)
 	return NOMOUNT_I(i)->lower_inode;
 }
 
-static inline struct super_block *nomount_lower_super(const struct super_block *sb)
-{
-	return NOMOUNT_SB(sb)->lower_sb;
-}
-
 /* Copying and handling lower paths safely */
 static inline void pathcpy(struct path *dst, const struct path *src)
 {
-	dst->dentry = src->dentry;
-	dst->mnt = src->mnt;
+	/* Struct assignment allows the compiler to emit LDP/STP
+	 * instructions, doing the copy in a single clock cycle
+	 * instead of member-by-member.
+	 */
+	*dst = *src;
 }
 
 /* Safely retrieve the lower path while holding the dentry lock */
@@ -216,27 +216,6 @@ static inline void nomount_get_lower_path(const struct dentry *dent, struct path
 	info = rcu_dereference(dent->d_fsdata);
 	if (info && info->num_lower_paths > 0) {
 		pathcpy(lower_path, &info->lower_paths[0]);
-		path_get(lower_path);
-	} else {
-		lower_path->dentry = NULL;
-		lower_path->mnt = NULL;
-	}
-	rcu_read_unlock();
-}
-
-/*
- * RCU version: no spinlock needed for readers.
- * Returns the path of the lowest layer (e.g., the original /system file).
- */
-static inline void nomount_get_lowest_lower_path(const struct dentry *dent, struct path *lower_path)
-{
-	struct nomount_dentry_info *info;
-
-	rcu_read_lock();
-	info = rcu_dereference(dent->d_fsdata);
-	
-	if (info && info->num_lower_paths > 0) {
-		pathcpy(lower_path, &info->lower_paths[info->num_lower_paths - 1]);
 		path_get(lower_path);
 	} else {
 		lower_path->dentry = NULL;
@@ -276,27 +255,6 @@ static inline void nomount_get_lower_path(const struct dentry *dent, struct path
 	spin_lock(&info->lock);
 	if (info->num_lower_paths > 0) {
 		pathcpy(lower_path, &info->lower_paths[0]);
-		path_get(lower_path);
-	} else {
-		lower_path->dentry = NULL;
-		lower_path->mnt = NULL;
-	}
-	spin_unlock(&info->lock);
-}
-
-static inline void nomount_get_lowest_lower_path(const struct dentry *dent, struct path *lower_path)
-{
-	struct nomount_dentry_info *info = NOMOUNT_D(dent);
-
-	if (!info) {
-		lower_path->dentry = NULL;
-		lower_path->mnt = NULL;
-		return;
-	}
-
-	spin_lock(&info->lock);
-	if (info->num_lower_paths > 0) {
-		pathcpy(lower_path, &info->lower_paths[info->num_lower_paths - 1]);
 		path_get(lower_path);
 	} else {
 		lower_path->dentry = NULL;
@@ -357,12 +315,6 @@ static inline void nomount_set_lower_inode(struct inode *inode, struct inode *lo
  * - nomount_lookup(): after new_dentry_private_data(), before d_add/d_splice_alias
  * - nomount_fill_super(): for root dentry, before sb->s_root assignment
  */
-static inline void nomount_set_lower_path(struct dentry *dent, struct path *lower_path)
-{
-	pathcpy(&NOMOUNT_D(dent)->lower_paths[0], lower_path);
-	NOMOUNT_D(dent)->num_lower_paths = 1;
-}
-
 static inline void nomount_set_lower_paths(struct dentry *dent, struct path *lower_paths, int num_paths)
 {
 	int i;

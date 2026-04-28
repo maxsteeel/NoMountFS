@@ -1,6 +1,6 @@
 /*
  * NoMountFS: Dentry operations
- * Managing path name cache.
+ * Managing path name cache and RCU-walk safety.
  */
 
 #include "nomount.h"
@@ -15,17 +15,14 @@ static int nomount_d_revalidate(struct dentry *dentry, unsigned int flags)
 	struct nomount_dentry_info *info;
 	int valid = 1;
 
-	/* We read the private data directly using RCU semantics.
-	 * No path_get/path_put means no atomic operations.
+	/* * RCU-safe extraction without redundant locks. The VFS guarantees
+	 * either refcount protection or global rcu_read_lock() here.
 	 */
-	rcu_read_lock();
-	info = rcu_dereference(dentry->d_fsdata);
+	info = rcu_dereference_raw(dentry->d_fsdata);
 	if (unlikely(!info || !info->lower_paths[0].dentry)) {
-		rcu_read_unlock();
 		return -ECHILD;
 	}
 	lower_dentry = info->lower_paths[0].dentry;
-	rcu_read_unlock();
 
 	/* If the lower filesystem dentry has its own revalidate, call it */
 	if (lower_dentry->d_op && lower_dentry->d_op->d_revalidate) {
@@ -34,9 +31,15 @@ static int nomount_d_revalidate(struct dentry *dentry, unsigned int flags)
 			return valid;
 	}
 
-	/* Check if the lower inode has changed unexpectedly */
-	if (likely(d_really_is_positive(dentry) && d_really_is_positive(lower_dentry))) {
-		if (unlikely(d_inode(dentry)->i_ino != d_inode(lower_dentry)->i_ino))
+	/* * Use d_inode_rcu() to prevent NULL dereference 
+	 *  Kernel Panics during lockless RCU-walks where inodes can be 
+	 *  deleted concurrently by other threads.
+	 */
+	if (likely(d_really_is_positive(dentry))) {
+		struct inode *inode = d_inode_rcu(dentry);
+		struct inode *lower_inode = d_inode_rcu(lower_dentry);
+
+		if (unlikely(!inode || !lower_inode || inode->i_ino != lower_inode->i_ino))
 			valid = 0;
 	}
 
@@ -100,6 +103,9 @@ static int nomount_d_delete(const struct dentry *dentry)
 			err = 1;
 		else if (lower_dentry->d_op && lower_dentry->d_op->d_delete)
 			err = lower_dentry->d_op->d_delete(lower_dentry);
+	} else {
+		/* Corrupt or incomplete dentry info, force deletion */
+		err = 1;
 	}
 
 	return err;

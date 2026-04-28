@@ -8,37 +8,6 @@
 #include <linux/security.h>
 #include <linux/uidgid.h>
 
-/* * Private SELinux superblock structure extracted from 
- * 	 security/selinux/include/objsec.h.
- * * We redefine it here to manipulate SELinux behavior directly 
- *   without patching the kernel source tree.
- */
-struct superblock_security_struct {
-	u32 sid;
-	u32 def_sid;
-	u16 behavior;
-	u16 flags;
-	struct mutex lock;
-	struct list_head isec_head;
-	spinlock_t isec_lock;
-};
-
-/* Private SELinux inode structure (from security/selinux/include/objsec.h) */
-struct inode_security_struct {
-	struct inode *inode;
-	struct list_head list;
-	u32 task_sid;
-	u32 sid;
-	u16 sclass;
-	unsigned char initialized;
-};
-
-/* Constant to mark inode as properly initialized for SELinux */
-#define LABEL_INITIALIZED 1
-
-/* Constants from security/selinux/include/security.h */
-#define SBLABEL_MNT 0x01
-
 static struct kmem_cache *nomount_inode_cachep;
 
 /* * nomount_evict_inode: Called when an inode is being removed from memory.
@@ -78,7 +47,12 @@ static struct inode *nomount_alloc_inode(struct super_block *sb)
 		return NULL;
 
 	/* Initialize private data and VFS inode */
-	memset(i, 0, offsetof(struct nomount_inode_info, vfs_inode));
+
+	/* * FIX: Because vfs_inode is now at offset 0, we must clear 
+	 *  everything AFTER the vfs_inode to prevent leaving garbage data 
+	 *  in the lower_inode pointer.
+	 */
+	memset((char *)i + sizeof(struct inode), 0, sizeof(*i) - sizeof(struct inode));
 	nomount_set_iversion(&i->vfs_inode, 1);
 
 	hash_init(i->dirent_hashtable);
@@ -153,7 +127,7 @@ static int nomount_show_options(struct seq_file *m, struct dentry *root)
 {
 	struct nomount_sb_info *sbi;
 	uid_t uid;
-	int i;
+	int i, start_idx = 0;
 
 	if (!root) return 0;
 	sbi = NOMOUNT_SB(root->d_sb);
@@ -173,9 +147,12 @@ static int nomount_show_options(struct seq_file *m, struct dentry *root)
 		 * path), which causes init to remount with upperdir=/ and
 		 * corrupt the filesystem view. Use the saved strings instead.
 		 */
-		seq_show_option(m, "upperdir", sbi->lower_path_strs[0]);
+		if (sbi->has_upperdir) {
+			seq_show_option(m, "upperdir", sbi->lower_path_strs[0]);
+			start_idx = 1;
+		}
 
-		if (sbi->num_lower_paths > 1) {
+		if (sbi->num_lower_paths > start_idx) {
 			seq_puts(m, ",lowerdir=");
 			for (i = 1; i < sbi->num_lower_paths; i++) {
 				if (i > 1) seq_puts(m, ":");
@@ -362,6 +339,7 @@ static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mo
 	int err;
 
 	sbi->num_lower_paths = 0;
+	sbi->has_upperdir = false;
 
 	/* Process upperdir (layer 0) if provided, mimicking OverlayFS */
 	if (opts->upperdir_str && *opts->upperdir_str) {
@@ -386,11 +364,13 @@ static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mo
 			path_put(&raw);
 			return err;
 		}
-		/* raw.mnt ref is now owned by the private clone; release it */
-		mntput(raw.mnt);
+		/* raw.mnt ref is now owned by the private clone; release it.
+		 * NOTE: Use path_put instead of mntput to prevent dentry memory leaks */
+		path_put(&raw);
 		strlcpy(sbi->lower_path_strs[sbi->num_lower_paths],
 			opts->upperdir_str, PATH_MAX);
 		sbi->num_lower_paths++;
+                sbi->has_upperdir = true;
 	}
 
 	/* Process lowerdir(s), splitting by : for union branches */
@@ -415,7 +395,8 @@ static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mo
 				path_put(&raw);
 				return err;
 			}
-			mntput(raw.mnt);
+			/* NOTE: Use path_put to balance the kern_path references */
+			path_put(&raw);
 			strlcpy(sbi->lower_path_strs[sbi->num_lower_paths],
 				branch_str, PATH_MAX);
 			sbi->num_lower_paths++;
@@ -465,7 +446,7 @@ static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mo
 			path_put(&raw);
 			return err;
 		}
-		mntput(raw.mnt);
+		path_put(&raw);
 		strlcpy(sbi->inject_name, opts->inject_name_str, sizeof(sbi->inject_name));
 		sbi->inject_name_len = strlen(sbi->inject_name);
 		sbi->inject_name_hash = full_name_hash(NULL, sbi->inject_name, sbi->inject_name_len);
@@ -501,23 +482,6 @@ static int nomount_setup_superblock(struct super_block *sb, struct nomount_sb_in
 	sb->s_d_op = &nomount_dops;
 	sb->s_export_op = &nomount_export_ops;
 	sb->s_xattr = nomount_xattr_handlers;
-
-	/*
-	 * NOTE: security_sb_clone_mnt_opts() call has been removed.
-	 * 
-	 * The selinux_sb_clone_mnt_opts() function internally calls sb_finish_set_opts()
-	 * which can dereference NULL pointers in the superblock's security structures
-	 * on certain Android kernel versions (like 5.4). The crash occurs at offset 0x30
-	 * in sb_finish_set_opts, indicating access to an uninitialized security blob.
-	 *
-	 * SELinux labeling still works via genfscon rules in sepolicy.rule which label
-	 * inodes based on filesystem path (e.g., /system/ gets system_file labels).
-	 * This is the standard mechanism for read-only filesystems and doesn't require
-	 * cloning mount options.
-	 *
-	 * Our xattr handler forwards security.selinux getxattr to the lower inode,
-	 * so existing xattr-based labels are preserved when available.
-	 */
 
 	/*
 	 * Always use our own magic number. Spoofing the lower filesystem's
@@ -588,14 +552,23 @@ static void nomount_setup_selinux(struct super_block *sb, struct nomount_sb_info
 	struct inode *root_lower = d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry);
 	char *ctx = NULL;
 	unsigned int ctxlen = 0;
-	unsigned long set_kern_flags = 0;
-	int err;
 
-	/* Clone mount options for SELinux */
-	err = security_sb_clone_mnt_opts(sbi->lower_sb, sb, 0, &set_kern_flags);
-	if (err) {
-		pr_err("nomount: security_sb_clone_mnt_opts failed: %d\n", err);
-	}
+	/*
+	 * NOTE: security_sb_clone_mnt_opts() call has been removed.
+	 * 
+	 * The selinux_sb_clone_mnt_opts() function internally calls sb_finish_set_opts()
+	 * which can dereference NULL pointers in the superblock's security structures
+	 * on certain Android kernel versions (like 5.4). The crash occurs at offset 0x30
+	 * in sb_finish_set_opts, indicating access to an uninitialized security blob.
+	 *
+	 * SELinux labeling still works via genfscon rules in sepolicy.rule which label
+	 * inodes based on filesystem path (e.g., /system/ gets system_file labels).
+	 * This is the standard mechanism for read-only filesystems and doesn't require
+	 * cloning mount options.
+	 *
+	 * Our xattr handler forwards security.selinux getxattr to the lower inode,
+	 * so existing xattr-based labels are preserved when available.
+	 */
 
 	/* Now that SBLABEL_MNT is set, label the root inode from lower */
 	if (security_inode_getsecctx(root_lower, (void **)&ctx, &ctxlen) == 0 && ctx) {
@@ -660,7 +633,9 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		sb->s_type = sbi->fake_type;
 	}
 
-	sb->s_dev = sbi->lower_sb->s_dev;
+	if (sbi->lower_paths[sbi->num_lower_paths - 1].dentry == sbi->lower_sb->s_root) {
+		sb->s_dev = sbi->lower_sb->s_dev;
+	}
 
 	return 0;
 

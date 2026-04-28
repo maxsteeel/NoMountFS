@@ -26,3 +26,5 @@ ifeq ($(shell grep -c "clone_private_mount" \
 	$(srctree)/fs/namespace.c 2>/dev/null || echo 0), 0)
 	ccflags-y += -DNOMOUNT_NO_CLONE_PRIVATE_MOUNT
 endif
+
+ccflags-y += -Wall -Wextra -Wno-unused-parameter -Wno-sign-compare -Wno-missing-field-initializers
