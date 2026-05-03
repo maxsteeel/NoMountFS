@@ -1,23 +1,23 @@
 /*
- * NoMountFS: Path Resolution and Inode Management
+ * Mirage: Path Resolution and Inode Management
  */
 #include <linux/security.h>
-#include "nomount.h"
+#include "mirage.h"
 #include "compat.h"
 
-struct kmem_cache *nomount_dentry_cachep;
+struct kmem_cache *mirage_dentry_cachep;
 extern struct dentry *lookup_one_len_unlocked(const char *name, struct dentry *base, int len);
 
 /* * Inode Cache: Handles the mapping between virtual and real inodes.
  */
-static int nomount_inode_test(struct inode *inode, void *candidate_lower_inode)
+static int mirage_inode_test(struct inode *inode, void *candidate_lower_inode)
 {
-	struct inode *current_lower_inode = nomount_lower_inode(inode);
+	struct inode *current_lower_inode = mirage_lower_inode(inode);
 	return (current_lower_inode == (struct inode *)candidate_lower_inode);
 }
 
 /* Atomic initialization function required by iget5_locked */
-static int nomount_inode_set(struct inode *inode, void *opaque)
+static int mirage_inode_set(struct inode *inode, void *opaque)
 {
 	struct inode *lower_inode = opaque;
 	
@@ -28,9 +28,9 @@ static int nomount_inode_set(struct inode *inode, void *opaque)
 	return 0;
 }
 
-/* * nomount_iget: Retrieves an existing virtual inode or creates a new one.
+/* * mieage_iget: Retrieves an existing virtual inode or creates a new one.
  */
-struct inode *nomount_iget(struct super_block *sb, struct inode *lower_inode)
+struct inode *mirage_iget(struct super_block *sb, struct inode *lower_inode)
 {
 	struct inode *inode;
 
@@ -40,7 +40,7 @@ struct inode *nomount_iget(struct super_block *sb, struct inode *lower_inode)
 	/* Use hash lookup to find if we already have a virtual inode for this real one.
 	 * iget5_locked will call nomount_inode_set internally if it is a new inode */
 	inode = iget5_locked(sb, lower_inode->i_ino,
-			     nomount_inode_test, nomount_inode_set, lower_inode);
+			     mirage_inode_test, mirage_inode_set, lower_inode);
 
 	if (unlikely(!inode)) {
 		iput(lower_inode);
@@ -54,19 +54,19 @@ struct inode *nomount_iget(struct super_block *sb, struct inode *lower_inode)
 	}
 
 	/* Setup the new inode */
-	nomount_set_lower_inode(inode, lower_inode);
-	nomount_inc_iversion(inode);
+	set_lower_inode(inode, lower_inode);
+	mirage_inc_iversion(inode);
 
 	/* Inherit operations based on type */
 	if (S_ISDIR(lower_inode->i_mode)) {
-		inode->i_op = &nomount_dir_iops;
-		inode->i_fop = &nomount_dir_fops;
+		inode->i_op = &mirage_dir_iops;
+		inode->i_fop = &mirage_dir_fops;
 	} else if (S_ISLNK(lower_inode->i_mode)) {
-		inode->i_op = &nomount_symlink_iops;
-		inode->i_fop = &nomount_main_fops;
+		inode->i_op = &mirage_symlink_iops;
+		inode->i_fop = &mirage_main_fops;
 	} else {
-		inode->i_op = &nomount_main_iops;
-		inode->i_fop = &nomount_main_fops;
+		inode->i_op = &mirage_main_iops;
+		inode->i_fop = &mirage_main_fops;
 	}
 
 	inode->i_mapping->a_ops = &nomount_aops;
@@ -99,16 +99,16 @@ struct inode *nomount_iget(struct super_block *sb, struct inode *lower_inode)
 	return inode;
 }
 
-/* * __nomount_interpose: Links a virtual dentry with its inode.
+/* * __mirage_interpose: Links a virtual dentry with its inode.
  */
-struct dentry *__nomount_interpose(struct dentry *dentry,
+struct dentry *__mirage_interpose(struct dentry *dentry,
 					 struct super_block *sb,
 					 struct path *lower_path)
 {
 	struct inode *inode;
 	struct inode *lower_inode = d_inode(lower_path->dentry);
 
-	inode = nomount_iget(sb, lower_inode);
+	inode = mirage_iget(sb, lower_inode);
 	if (IS_ERR(inode))
 		return ERR_CAST(inode);
 
@@ -116,16 +116,16 @@ struct dentry *__nomount_interpose(struct dentry *dentry,
 	return d_splice_alias(inode, dentry);
 }
 
-/* * nomount_lookup: The main entry point for path resolution.
+/* * mirage_vfs_lookup: The main entry point for path resolution.
  */
-struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
+struct dentry *mirage_vfs_lookup(struct inode *dir, struct dentry *dentry,
 			     unsigned int flags)
 {
 	struct dentry *ret, *lower_dentry;
-	struct nomount_dentry_info *parent_info;
+	struct mirage_dentry_info *parent_info;
 	struct path found_paths[NOMOUNT_MAX_BRANCHES];
 	int num_found_paths = 0;
-	struct nomount_sb_info *sbi;
+	struct mirage_sb_info *sbi;
 	struct qstr name = dentry->d_name;
 	int err, i;
 
@@ -136,7 +136,7 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 	}
 
 	/* Get the superblock info from the dentry's superblock, not allocate new */
-	sbi = NOMOUNT_SB(dentry->d_sb);
+	sbi = mirage_sb(dentry->d_sb);
 
 	if (unlikely(sbi && sbi->has_inject && name.hash == sbi->inject_name_hash && 
 	      name.len == sbi->inject_name_len && memcmp(name.name, sbi->inject_name, name.len) == 0)) {
@@ -167,7 +167,7 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 			 * If the child dentry is itself a mount point, follow_down
 			 * traverses into the mounted filesystem. Without this, a
 			 * union mount where lowerdir == mount point would recurse
-			 * back into nomount_lookup infinitely, crashing the kernel.
+			 * back into mirage_vfs_lookup infinitely, crashing the kernel.
 			 *
 			 * We build a full path so follow_down can update both the
 			 * dentry and the vfsmount atomically.
@@ -217,22 +217,22 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 
 	if (num_found_paths == 0) {
 		/* Negative dentry: file doesn't exist AND no negative dentry available (rare error). */
-		nomount_set_lower_paths(dentry, found_paths, 0); 
+		set_lower_paths(dentry, found_paths, 0); 
 		d_add(dentry, NULL);
 		ret = NULL;
 	} else if (d_really_is_negative(found_paths[0].dentry)) {
 		/* Proper negative dentry cached, ready for creation */
-		nomount_set_lower_paths(dentry, found_paths, 1);
+		set_lower_paths(dentry, found_paths, 1);
 		d_add(dentry, NULL);
 		ret = NULL;
 	} else {
-		nomount_set_lower_paths(dentry, found_paths, num_found_paths);
+		set_lower_paths(dentry, found_paths, num_found_paths);
 		/* Positive dentry: Interpose virtual dentry with real inode (from topmost branch) */
-		ret = __nomount_interpose(dentry, dentry->d_sb, &found_paths[0]);
+		ret = __mirage_interpose(dentry, dentry->d_sb, &found_paths[0]);
 		if (IS_ERR(ret)) {
 			/*
 			 * Interpose failed. free_dentry_private_data releases all paths
-			 * that were stored via nomount_set_lower_paths — do NOT put them
+			 * that were stored via set_lower_paths — do NOT put them
 			 * again. Jump directly to parent cleanup.
 			 */
 			free_dentry_private_data(dentry);
@@ -251,16 +251,16 @@ struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
 
 /* --- Dentry Cache Initialization --- */
 
-int nomount_init_dentry_cache(void)
+int mirage_init_dentry_cache(void)
 {
-	nomount_dentry_cachep = kmem_cache_create("nomount_dentry_cache",
-					sizeof(struct nomount_dentry_info),
-					0, SLAB_RECLAIM_ACCOUNT | SLAB_HWCACHE_ALIGN, NULL);
-	return nomount_dentry_cachep ? 0 : -ENOMEM;
+	mirage_dentry_cachep = kmem_cache_create("mirage_dentry_cache",
+											  sizeof(struct mirage_dentry_info),
+											  0, SLAB_RECLAIM_ACCOUNT | SLAB_HWCACHE_ALIGN, NULL);
+	return mirage_dentry_cachep ? 0 : -ENOMEM;
 }
 
-void nomount_destroy_dentry_cache(void)
+void mirage_destroy_dentry_cache(void)
 {
-	if (nomount_dentry_cachep)
-		kmem_cache_destroy(nomount_dentry_cachep);
+	if (mirage_dentry_cachep)
+		kmem_cache_destroy(mirage_dentry_cachep);
 }

@@ -1,11 +1,11 @@
 /*
- * NoMountFS: A stackable file system for Android content redirection.
+ * Mirage: A stackable virtual file system for Android content redirection.
  *   Based on WrapFS by Erez Zadok.
- *   This file contains the private declarations for nomountfs.
+ *   This file contains the private declarations for mirage.
  */
 
-#ifndef _NOMOUNT_H_
-#define _NOMOUNT_H_
+#ifndef _MIRAGE_H_
+#define _MIRAGE_H_
 
 #include <linux/dcache.h>
 #include <linux/file.h>
@@ -26,92 +26,91 @@
 #include <linux/limits.h>
 #include <linux/exportfs.h>
 #include <linux/rcupdate.h>
-#ifdef NOMOUNT_FS_KERNEL_UMOUNT
+#ifdef MIRAGE_KERNEL_UMOUNT
 /* Include kernel umount support */
-#include "nomount_umount.h"
+#include "kernel_umount.h"
 #endif
 #include "compat.h"
 
-/* The file system name for 'mount -t nomountfs' */
-#define NOMOUNT_NAME "nomountfs"
+/* The file system name for 'mount -t mirage' */
+#define MIRAGE_NAME "mirage"
 
-/* Nomountfs root inode number */
-#define NOMOUNT_ROOT_INO     1
+/* Mirage root inode number */
+#define MIRAGE_ROOT_INO     1
 
-/* Nomountfs magic number */
-#define NOMOUNT_FS_MAGIC 0xF18F
+/* Mirage magic number */
+#define MIRAGE_FS_MAGIC 0xF18F
 
 /* Max number of stacked directories */
-#define NOMOUNT_MAX_BRANCHES 5
+#define MIRAGE_MAX_BRANCHES 5
 
 /* Operations vectors defined in specific files */
-extern struct file_system_type nomount_fs_type;
-extern const struct file_operations nomount_main_fops;
-extern const struct file_operations nomount_dir_fops;
-extern const struct inode_operations nomount_main_iops;
-extern const struct inode_operations nomount_dir_iops;
-extern const struct inode_operations nomount_symlink_iops;
-extern const struct super_operations nomount_sops;
-extern const struct dentry_operations nomount_dops;
-extern const struct address_space_operations nomount_aops;
-extern const struct vm_operations_struct nomount_vm_ops;
-extern const struct export_operations nomount_export_ops;
-extern const struct xattr_handler *nomount_xattr_handlers[];
+extern struct file_system_type mirage_fs_type;
+extern const struct file_operations mirage_main_fops;
+extern const struct file_operations mirage_dir_fops;
+extern const struct inode_operations mirage_main_iops;
+extern const struct inode_operations mirage_dir_iops;
+extern const struct inode_operations mirage_symlink_iops;
+extern const struct super_operations mirage_sops;
+extern const struct dentry_operations mirage_dops;
+extern const struct address_space_operations mirage_aops;
+extern const struct vm_operations_struct mirage_vm_ops;
+extern const struct export_operations mirage_export_ops;
+extern const struct xattr_handler *mirage_xattr_handlers[];
 
 /* Cache and lifecycle management functions */
-extern struct cred *nmfs_cred;
-extern int nomount_init_inode_cache(void);
-extern void nomount_destroy_inode_cache(void);
-extern struct kmem_cache *nomount_dentry_cachep;
-extern int nomount_init_dentry_cache(void);
-extern void nomount_destroy_dentry_cache(void);
-extern struct kmem_cache *nomount_dirent_cachep;
-extern int nomount_init_dirent_cache(void);
-extern void nomount_destroy_dirent_cache(void);
+extern struct cred *mirage_cred;
+extern int mirage_init_inode_cache(void);
+extern void mirage_destroy_inode_cache(void);
+extern struct kmem_cache *mirage_dentry_cachep;
+extern int mirage_init_dentry_cache(void);
+extern void mirage_destroy_dentry_cache(void);
+extern struct kmem_cache *mirage_dirent_cachep;
+extern int mirage_init_dirent_cache(void);
+extern void mirage_destroy_dirent_cache(void);
 extern int new_dentry_private_data(struct dentry *dentry);
 extern void free_dentry_private_data(struct dentry *dentry);
 
 /* Core lookup and interpose functions */
-extern struct dentry *nomount_lookup(struct inode *dir, struct dentry *dentry,
-				      				  unsigned int flags);
-extern struct inode *nomount_iget(struct super_block *sb, struct inode *lower_inode);
-extern struct dentry *__nomount_interpose(struct dentry *dentry,
+extern struct dentry *mirage_vfs_lookup(struct inode *dir, struct dentry *dentry,
+				      				    unsigned int flags);
+extern struct inode *mirage_iget(struct super_block *sb, struct inode *lower_inode);
+extern struct dentry *__mirage_interpose(struct dentry *dentry,
 					 					  struct super_block *sb,
 					 					  struct path *lower_path);
-extern int nomount_fill_super(struct super_block *sb, void *raw_data, int silent);
-extern int nomount_statfs(struct dentry *dentry, struct kstatfs *buf);
+extern int mirage_fill_super(struct super_block *sb, void *raw_data, int silent);
+extern int mirage_vfs_statfs(struct dentry *dentry, struct kstatfs *buf);
 #if defined(HAVE_ITERATE_SHARED) || defined(HAVE_ITERATE)
-extern int nomount_iterate(struct file *file, struct dir_context *ctx);
+extern int mirage_vfs_iterate(struct file *file, struct dir_context *ctx);
 #else
-extern int nomount_readdir(struct file *file, void *dirent, filldir_t filldir);
+extern int mirage_vfs_readdir(struct file *file, void *dirent, filldir_t filldir);
 #endif
-extern int nomount_mmap(struct file *file, struct vm_area_struct *vma);
-extern int nomount_test_inode(struct inode *inode, void *data);
-extern int nomount_set_inode(struct inode *inode, void *data);
+extern int mirage_vfs_mmap(struct file *file, struct vm_area_struct *vma);
+extern int mirage_test_inode(struct inode *inode, void *data);
+extern int mirage_set_inode(struct inode *inode, void *data);
 
 /* Tracepoint hook functions */
-extern int nomount_init_hooks(void);
-extern void nomount_exit_hooks(void);
+extern int mirage_init_tp_hooks(void);
+extern void mirage_exit_tp_hooks(void);
 
 /* Used to track already emitted dirents for deduplication */
-struct nomount_dirent {
+struct mirage_dirent {
 	struct hlist_node hash; /* For fast O(1) deduplication lookups */
 	struct list_head list;  /* For ordered O(1) emissions */
 	char name[NAME_MAX + 1];
-	int len;
-	u64 ino;
+	int len; u64 ino;
 	unsigned int d_type;
 };
 
 /* File private data: link to the real underlying file(s) */
-struct nomount_file_info {
-	struct file *lower_files[NOMOUNT_MAX_BRANCHES];
+struct mirage_file_info {
+	struct file *lower_files[MIRAGE_MAX_BRANCHES];
 	int num_lower_files;
 	bool ghost_emitted;
 };
 
-/* Nomountfs inode data in memory */
-struct nomount_inode_info {
+/* Inode data in memory */
+struct mirage_inode_info {
 	/* vfs_inode at Offset 0. */
 	struct inode vfs_inode;
 	struct inode *lower_inode;
@@ -125,20 +124,20 @@ struct nomount_inode_info {
 	bool cache_populated;
 };
 
-/* Nomountfs dentry data in memory */
-struct nomount_dentry_info {
-#ifdef NOMOUNT_RCU_PATH_ACCESS
+/* Dentry data in memory */
+struct mirage_dentry_info {
+#ifdef MIRAGE_RCU_PATH_ACCESS
 	struct rcu_head rcu;	/* For kfree_rcu() deferred freeing */
 #endif
 	spinlock_t lock;	/* Protects lower_paths (write side only) */
-	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
+	struct path lower_paths[MIRAGE_MAX_BRANCHES];
 	int num_lower_paths;
 };
 
-/* Nomountfs super-block data in memory */
-struct nomount_sb_info {
+/* super-block data in memory */
+struct mirage_sb_info {
 	struct super_block *lower_sb;
-	struct path lower_paths[NOMOUNT_MAX_BRANCHES];
+	struct path lower_paths[MIRAGE_MAX_BRANCHES];
 	int num_lower_paths;
 	bool has_inject;
 	bool has_upperdir;
@@ -149,7 +148,7 @@ struct nomount_sb_info {
 	/* Original path strings saved for /proc/mounts show_options.
 	 * d_path() on private vfsmount clones returns "/" — unusable.
 	 * Store the strings from the mount options directly instead. */
-	char lower_path_strs[NOMOUNT_MAX_BRANCHES][PATH_MAX];
+	char lower_path_strs[MIRAGE_MAX_BRANCHES][PATH_MAX];
 	char inject_path_str[PATH_MAX];
 	struct file_system_type *fake_type; /* For export operations to identify the filesystem type */
 };
@@ -164,25 +163,25 @@ struct nomount_mount_data {
  * Inode to private data conversion.
  * Since struct inode is embedded, this will always return a valid pointer.
  */
-static inline struct nomount_inode_info *NOMOUNT_I(const struct inode *inode)
+static inline struct nomount_inode_info *mirage_inode(const struct inode *inode)
 {
-	return container_of(inode, struct nomount_inode_info, vfs_inode);
+	return container_of(inode, struct mirage_inode_info, vfs_inode);
 }
 
 /* Helper macros for accessing private data */
-#define NOMOUNT_D(dent) ((struct nomount_dentry_info *)(dent)->d_fsdata)
-#define NOMOUNT_SB(super) ((struct nomount_sb_info *)(super)->s_fs_info)
-#define NOMOUNT_F(file) ((struct nomount_file_info *)((file)->private_data))
+#define mirage_dentry(dent) ((struct mirage_dentry_info *)(dent)->d_fsdata)
+#define mirage_sb(super) ((struct mirage_sb_info *)(super)->s_fs_info)
+#define mirage_file(file) ((struct mirage_file_info *)((file)->private_data))
 
 /* Helper functions to get/set lower (real) objects */
-static inline struct file *nomount_lower_file(const struct file *f)
+static inline struct file *mirage_lower_file(const struct file *file)
 {
-	return NOMOUNT_F(f)->lower_files[0]; /* Return topmost file for general I/O */
+	return mirage_file(file)->lower_files[0]; /* Return topmost file for general I/O */
 }
 
-static inline struct inode *nomount_lower_inode(const struct inode *i)
+static inline struct inode *mirage_lower_inode(const struct inode *inode)
 {
-	return NOMOUNT_I(i)->lower_inode;
+	return mirage_inode(inode)->lower_inode;
 }
 
 /* Copying and handling lower paths safely */
@@ -196,7 +195,7 @@ static inline void pathcpy(struct path *dst, const struct path *src)
 }
 
 /* Safely retrieve the lower path while holding the dentry lock */
-#ifdef NOMOUNT_RCU_PATH_ACCESS
+#ifdef MIRAGE_RCU_PATH_ACCESS
 /*
  * RCU version: no spinlock needed for readers.
  *
@@ -208,9 +207,9 @@ static inline void pathcpy(struct path *dst, const struct path *src)
  * Immutable:    info->lower_paths[], info->num_lower_paths
  * Race-free:    d_fsdata cleared under dentry->d_lock before kfree_rcu()
  */
-static inline void nomount_get_lower_path(const struct dentry *dent, struct path *lower_path)
+static inline void get_lower_path(const struct dentry *dent, struct path *lower_path)
 {
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 
 	rcu_read_lock();
 	info = rcu_dereference(dent->d_fsdata);
@@ -224,11 +223,11 @@ static inline void nomount_get_lower_path(const struct dentry *dent, struct path
 	rcu_read_unlock();
 }
 
-/* RCU version: no spinlock needed for readers - see nomount_get_lower_path() for safety */
-static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct path *lower_paths)
+/* RCU version: no spinlock needed for readers - see get_lower_path() for safety */
+static inline int get_all_lower_paths(const struct dentry *dent, struct path *lower_paths)
 {
 	int i, num;
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 
 	rcu_read_lock();
 	info = rcu_dereference(dent->d_fsdata);
@@ -242,11 +241,11 @@ static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct 
 }
 #else
 /* Legacy spinlock version */
-static inline void nomount_get_lower_path(const struct dentry *dent, struct path *lower_path)
+static inline void get_lower_path(const struct dentry *dent, struct path *lower_path)
 {
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 
-	info = NOMOUNT_D(dent);
+	info = mirage_dentry(dent);
 	if (!info) {
 		lower_path->dentry = NULL;
 		lower_path->mnt = NULL;
@@ -263,12 +262,12 @@ static inline void nomount_get_lower_path(const struct dentry *dent, struct path
 	spin_unlock(&info->lock);
 }
 
-static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct path *lower_paths)
+static inline int get_all_lower_paths(const struct dentry *dent, struct path *lower_paths)
 {
 	int i, num;
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 
-	info = NOMOUNT_D(dent);
+	info = mirage_dentry(dent);
 	if (!info)
 		return 0;
 
@@ -283,13 +282,13 @@ static inline int nomount_get_all_lower_paths(const struct dentry *dent, struct 
 }
 #endif
 
-static inline void nomount_put_lower_path(const struct dentry *dent, struct path *lower_path)
+static inline void put_lower_path(const struct dentry *dent, struct path *lower_path)
 {
 	if (lower_path->dentry)
 		path_put(lower_path);
 }
 
-static inline void nomount_put_all_lower_paths(const struct dentry *dent, struct path *lower_paths, int num)
+static inline void put_all_lower_paths(const struct dentry *dent, struct path *lower_paths, int num)
 {
 	int i;
 	for (i = 0; i < num; i++) {
@@ -299,9 +298,9 @@ static inline void nomount_put_all_lower_paths(const struct dentry *dent, struct
 }
 
 /* Helpers to set private data - MUST only be called before dentry is visible */
-static inline void nomount_set_lower_inode(struct inode *inode, struct inode *lowernode)
+static inline void set_lower_inode(struct inode *inode, struct inode *lowernode)
 {
-	NOMOUNT_I(inode)->lower_inode = lowernode;
+	mirage_inode(inode)->lower_inode = lowernode;
 }
 
 /*
@@ -315,13 +314,13 @@ static inline void nomount_set_lower_inode(struct inode *inode, struct inode *lo
  * - nomount_lookup(): after new_dentry_private_data(), before d_add/d_splice_alias
  * - nomount_fill_super(): for root dentry, before sb->s_root assignment
  */
-static inline void nomount_set_lower_paths(struct dentry *dent, struct path *lower_paths, int num_paths)
+static inline void set_lower_paths(struct dentry *dent, struct path *lower_paths, int num_paths)
 {
 	int i;
 	for (i = 0; i < num_paths; i++) {
-		pathcpy(&NOMOUNT_D(dent)->lower_paths[i], &lower_paths[i]);
+		pathcpy(&mirage_dentry(dent)->lower_paths[i], &lower_paths[i]);
 	}
-	NOMOUNT_D(dent)->num_lower_paths = num_paths;
+	mirage_dentry(dent)->num_lower_paths = num_paths;
 }
 
 /* Locking helpers for directory operations */
@@ -338,4 +337,4 @@ static inline void unlock_dir(struct dentry *dir)
 	dput(dir);
 }
 
-#endif	/* _NOMOUNT_H_ */
+#endif	/* _MIRAGE_H_ */

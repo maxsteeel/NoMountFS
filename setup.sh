@@ -2,13 +2,13 @@
 set -eu
 GKI_ROOT=$(pwd)
 OWNER="maxsteeel"
-REPO="NoMountFS"
+REPO="Mirage"
 FS_DIR=""
 
 display_usage() {
     echo "Usage: $0 [--cleanup | <commit-or-tag>]"
-    echo "  --cleanup:       Removes NoMountFS from the kernel tree."
-    echo "  <commit-or-tag>: Sets up NoMountFS to a specific version."
+    echo "  --cleanup:       Removes Mirage from the kernel tree."
+    echo "  <commit-or-tag>: Sets up Mirage to a specific version."
 }
 
 initialize_variables() {
@@ -25,13 +25,13 @@ initialize_variables() {
 }
 
 perform_cleanup() {
-    echo "[+] Cleaning up NoMountFS..."
-    [ -L "$FS_DIR/nomount" ] && rm "$FS_DIR/nomount" && echo "[-] Symlink removed."
+    echo "[+] Cleaning up Mirage..."
+    [ -L "$FS_DIR/mirage" ] && rm "$FS_DIR/mirage" && echo "[-] Symlink removed."
     if [ -f "$FS_MAKEFILE" ]; then
-        sed -i '/nomount/d' "$FS_MAKEFILE" && echo "[-] Makefile reverted."
+        sed -i '/mirage/d' "$FS_MAKEFILE" && echo "[-] Makefile reverted."
     fi
     if [ -f "$FS_KCONFIG" ]; then
-        sed -i '/nomount\/Kconfig/d' "$FS_KCONFIG" && echo "[-] Kconfig reverted."
+        sed -i '/mirage\/Kconfig/d' "$FS_KCONFIG" && echo "[-] Kconfig reverted."
     fi
 
     if [ -d "$GKI_ROOT/$REPO" ]; then
@@ -44,8 +44,8 @@ perform_cleanup() {
     echo "[+] Done."
 }
 
-setup_nomountfs() {
-    echo "[+] Setting up NoMountFS..."
+setup_mirage() {
+    echo "[+] Setting up Mirage..."
     if [ ! -d "$GKI_ROOT/$REPO" ]; then
         git clone "https://github.com/$OWNER/$REPO" || { echo "[!] Clone failed"; exit 1; }
     fi
@@ -62,19 +62,19 @@ setup_nomountfs() {
         git checkout "$1" && echo "[-] Checked out $1."
     fi
     cd "$FS_DIR"
-    ln -sf "$(realpath --relative-to="$FS_DIR" "$GKI_ROOT/$REPO/src")" "nomount"
-    echo "[+] Symlink created: fs/nomount -> $REPO/src"
-    if ! grep -q "nomount" "$FS_MAKEFILE"; then
-        printf "obj-\$(CONFIG_NOMOUNT_FS) += nomount/\n" >> "$FS_MAKEFILE"
+    ln -sf "$(realpath --relative-to="$FS_DIR" "$GKI_ROOT/$REPO/src")" "mirage"
+    echo "[+] Symlink created: fs/mirage -> $REPO/src"
+    if ! grep -q "mirage" "$FS_MAKEFILE"; then
+        printf "obj-\$(CONFIG_MIRAGE) += mirage  /\n" >> "$FS_MAKEFILE"
         echo "[+] Modified fs/Makefile"
     fi
-    if ! grep -q "nomount/Kconfig" "$FS_KCONFIG"; then
-        sed -i '$i source "fs/nomount/Kconfig"' "$FS_KCONFIG"
+    if ! grep -q "mirage/Kconfig" "$FS_KCONFIG"; then
+        sed -i '$i source "fs/mirage/Kconfig"' "$FS_KCONFIG"
         echo "[+] Modified fs/Kconfig"
     fi
 
-    echo '[+] NoMountFS is ready to be compiled!'
-    echo '[+] Run: make menuconfig and look for NoMountFS under File Systems'
+    echo '[+] Mirage is ready to be compiled!'
+    echo '[+] Run: make menuconfig and look for Mirage under File Systems'
 }
 
 if [ "$#" -eq 0 ]; then
@@ -87,5 +87,5 @@ elif [ "$1" = "--cleanup" ]; then
     perform_cleanup
 else
     initialize_variables
-    setup_nomountfs "$@"
+    setup_mirage "$@"
 fi

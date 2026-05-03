@@ -1,48 +1,48 @@
 /*
- * NoMountFS: Superblock operations and lifecycle management.
+ * Mirage: Superblock operations and lifecycle management.
  */
 
-#include "nomount.h"
+#include "mirage.h"
 #include "compat.h"
 
 #include <linux/security.h>
 #include <linux/uidgid.h>
 
-static struct kmem_cache *nomount_inode_cachep;
+static struct kmem_cache *mirage_inode_cachep;
 
-/* * nomount_evict_inode: Called when an inode is being removed from memory.
+/* * mirage_evict_inode: Called when an inode is being removed from memory.
  */
-static void nomount_evict_inode(struct inode *inode)
+static void mirage_evict_inode(struct inode *inode)
 {
 	struct inode *lower_inode;
-	struct nomount_inode_info *nii = NOMOUNT_I(inode);
-	struct nomount_dirent *nd, *tmp;
+	struct mirage_inode_info *mii = mirage_inode(inode);
+	struct mirage_dirent *md, *tmp;
 
 	/* Clean up cached directory entries */
-	mutex_lock(&nii->readdir_mutex);
-	list_for_each_entry_safe(nd, tmp, &nii->dirents_list, list) {
-		hash_del(&nd->hash);
-		list_del(&nd->list);
-		kfree(nd);
+	mutex_lock(&mii->readdir_mutex);
+	list_for_each_entry_safe(md, tmp, &mii->dirents_list, list) {
+		hash_del(&md->hash);
+		list_del(&md->list);
+		kfree(md);
 	}
-	mutex_unlock(&nii->readdir_mutex);
+	mutex_unlock(&mii->readdir_mutex);
 
 	truncate_inode_pages(&inode->i_data, 0);
 	clear_inode(inode);
 
 	/* Get the real inode and release it */
-	lower_inode = nomount_lower_inode(inode);
-	nomount_set_lower_inode(inode, NULL);
+	lower_inode = mirage_lower_inode(inode);
+	set_lower_inode(inode, NULL);
 	iput(lower_inode);
 }
 
-/* * nomount_alloc_inode: Efficient allocation using our custom slab cache.
+/* * mirage_alloc_inode: Efficient allocation using our custom slab cache.
  */
-static struct inode *nomount_alloc_inode(struct super_block *sb)
+static struct inode *mirage_alloc_inode(struct super_block *sb)
 {
-	struct nomount_inode_info *i;
+	struct mirage_inode_info *i;
 
-	i = kmem_cache_alloc(nomount_inode_cachep, GFP_KERNEL);
+	i = kmem_cache_alloc(mirage_inode_cachep, GFP_KERNEL);
 	if (unlikely(!i))
 		return NULL;
 
@@ -53,7 +53,7 @@ static struct inode *nomount_alloc_inode(struct super_block *sb)
 	 *  in the lower_inode pointer.
 	 */
 	memset((char *)i + sizeof(struct inode), 0, sizeof(*i) - sizeof(struct inode));
-	nomount_set_iversion(&i->vfs_inode, 1);
+	mirage_set_iversion(&i->vfs_inode, 1);
 
 	hash_init(i->dirent_hashtable);
 	INIT_LIST_HEAD(&i->dirents_list);
@@ -64,23 +64,23 @@ static struct inode *nomount_alloc_inode(struct super_block *sb)
 	return &i->vfs_inode;
 }
 
-static void nomount_i_callback(struct rcu_head *head)
+static void mirage_i_callback(struct rcu_head *head)
 {
 	struct inode *inode = container_of(head, struct inode, i_rcu);
-	kmem_cache_free(nomount_inode_cachep, NOMOUNT_I(inode));
+	kmem_cache_free(mirage_inode_cachep, MIRAGE_I(inode));
 }
 
-static void nomount_destroy_inode(struct inode *inode)
+static void mirage_destroy_inode(struct inode *inode)
 {
 	/* Use RCU to ensure no one is looking at the inode before freeing */
-	call_rcu(&inode->i_rcu, nomount_i_callback);
+	call_rcu(&inode->i_rcu, mirage_i_callback);
 }
 
-/* * nomount_put_super: Final cleanup during unmount.
+/* * mirage_put_super: Final cleanup during unmount.
  */
-void nomount_put_super(struct super_block *sb)
+void mirage_put_super(struct super_block *sb)
 {
-	struct nomount_sb_info *sbi = NOMOUNT_SB(sb);
+	struct mirage_sb_info *sbi = mirage_sb(sb);
 	int i;
 
 	if (!sbi)
@@ -102,9 +102,9 @@ void nomount_put_super(struct super_block *sb)
 	sb->s_fs_info = NULL;
 }
 
-int nomount_statfs(struct dentry *dentry, struct kstatfs *buf)
+int mirage_vfs_statfs(struct dentry *dentry, struct kstatfs *buf)
 {
-	struct nomount_sb_info *sbi = NOMOUNT_SB(dentry->d_sb);
+	struct mirage_sb_info *sbi = mirage_sb(dentry->d_sb);
 	int err;
 
 	if (!sbi || sbi->num_lower_paths == 0) return -ENOSYS;
@@ -120,17 +120,17 @@ int nomount_statfs(struct dentry *dentry, struct kstatfs *buf)
 	return err;
 }
 
-/* * nomount_show_options: Displays mount options in /proc/mounts.
+/* * mirage_show_options: Displays mount options in /proc/mounts.
  * Required for the system to identify the mount source.
  */
-static int nomount_show_options(struct seq_file *m, struct dentry *root)
+static int mirage_show_options(struct seq_file *m, struct dentry *root)
 {
-	struct nomount_sb_info *sbi;
+	struct mirage_sb_info *sbi;
 	uid_t uid;
 	int i, start_idx = 0;
 
 	if (!root) return 0;
-	sbi = NOMOUNT_SB(root->d_sb);
+	sbi = mirage_sb(root->d_sb);
 	if (!sbi) return 0;
 
 	uid = from_kuid_munged(current_user_ns(), current_uid());
@@ -173,9 +173,9 @@ static int nomount_show_options(struct seq_file *m, struct dentry *root)
 }
 
 /* Replace the word "none" in /proc/mounts with the actual physical block */
-static int nomount_show_devname(struct seq_file *m, struct dentry *root)
+static int mirage_show_devname(struct seq_file *m, struct dentry *root)
 {
-	struct nomount_sb_info *sbi = NOMOUNT_SB(root->d_sb);
+	struct mirage_sb_info *sbi = mirage_sb(root->d_sb);
 	if (sbi && sbi->lower_sb) {
 		seq_printf(m, "/dev/block/%s", sbi->lower_sb->s_id);
 	} else {
@@ -185,18 +185,18 @@ static int nomount_show_devname(struct seq_file *m, struct dentry *root)
 }
 
 /* Operation vector */
-const struct super_operations nomount_sops = {
-	.alloc_inode	= nomount_alloc_inode,
-	.destroy_inode	= nomount_destroy_inode,
-	.evict_inode	= nomount_evict_inode,
-	.drop_inode	= generic_delete_inode,
-	.put_super	= nomount_put_super,
-	.statfs		= nomount_statfs,
-	.show_options = nomount_show_options,
-	.show_devname = nomount_show_devname,
+const struct super_operations mirage_sops = {
+	.alloc_inode	= mirage_alloc_inode,
+	.destroy_inode	= mirage_destroy_inode,
+	.evict_inode	= mirage_evict_inode,
+	.drop_inode	    = generic_delete_inode,
+	.put_super	    = mirage_put_super,
+	.statfs		    = mirage_vfs_statfs,
+	.show_options   = mirage_show_options,
+	.show_devname   = mirage_show_devname,
 };
 
-struct nomount_mount_opts {
+struct mirage_mount_opts {
 	char *path_to_mount;
 	char *upperdir_str;
 	char *inject_name_str;
@@ -208,9 +208,9 @@ struct nomount_mount_opts {
 /* Parse the mount options from the raw data passed to fill_super.
  * This supports both regular mounts and direct file injection mounts.
  */
-static int nomount_parse_options(struct super_block *sb, struct nomount_mount_opts *parsed_opts, void *raw_data)
+static int mirage_parse_options(struct super_block *sb, struct mirage_mount_opts *parsed_opts, void *raw_data)
 {
-	struct nomount_mount_data *mdata = (struct nomount_mount_data *)raw_data;
+	struct mirage_mount_data *mdata = (struct mirage_mount_data *)raw_data;
 	const char *dev_name = mdata ? mdata->dev_name : NULL;
 	char *opts = mdata ? (char *)mdata->raw_data : NULL;
 	char *p;
@@ -250,7 +250,9 @@ static int nomount_parse_options(struct super_block *sb, struct nomount_mount_op
 	/* Fallback: If there is no 'lowerdir', use the original dev_name */
 	if (!parsed_opts->path_to_mount && dev_name && *dev_name) {
 		/* Ignore generic words that are often used as filler */
-		if (strcmp(dev_name, "none") != 0 && strcmp(dev_name, "nomountfs") != 0 && strcmp(dev_name, "KSU") != 0 && strcmp(dev_name, "APatch") != 0 && strcmp(dev_name, "magisk") != 0 && strcmp(dev_name, "worker") != 0) {
+		if (strcmp(dev_name, "none") != 0 && strcmp(dev_name, "mirage") != 0 &&
+			strcmp(dev_name, "KSU") != 0 && strcmp(dev_name, "APatch") != 0 &&
+			strcmp(dev_name, "magisk") != 0 && strcmp(dev_name, "worker") != 0) {
 			parsed_opts->path_to_mount = (char *)dev_name;
 		}
 	}
@@ -274,11 +276,11 @@ static int nomount_parse_options(struct super_block *sb, struct nomount_mount_op
 }
 
 /* Handle direct file injection with target= option
-* Syntax: mount -t nomountfs none <mount_dir> -o source=<src>,target=<file_to_shadow>
+* Syntax: mount -t mirage none <mount_dir> -o source=<src>,target=<file_to_shadow>
 * The lower_path must be the PARENT DIRECTORY of the target file, not the
 * target file itself — the filesystem root must always be a directory inode.
 */
-static int nomount_setup_direct_inject(struct nomount_sb_info *sbi, struct nomount_mount_opts *opts)
+static int mirage_setup_direct_inject(struct mirage_sb_info *sbi, struct mirage_mount_opts *opts)
 {
 	struct path target_path;
 	struct dentry *parent_dentry;
@@ -308,13 +310,13 @@ static int nomount_setup_direct_inject(struct nomount_sb_info *sbi, struct nomou
 	/*
 	 * Use the PARENT directory as the lower_path root, not the target file itself.
 	 * Use a private vfsmount clone so this path isn't affected by
-	 * nomountfs being installed over the same directory.
+	 * mirage being installed over the same directory.
 	 */
 	parent_dentry = dget_parent(target_path.dentry);
 	parent_path.dentry = parent_dentry;
 	parent_path.mnt = mntget(target_path.mnt); // same mnt, parent dentry
 	sbi->lower_paths[0].dentry = parent_dentry;
-	sbi->lower_paths[0].mnt = nomount_clone_private_mount(&parent_path);
+	sbi->lower_paths[0].mnt = mirage_clone_private_mount(&parent_path);
 	mntput(parent_path.mnt);
 	if (IS_ERR(sbi->lower_paths[0].mnt)) {
 		err = PTR_ERR(sbi->lower_paths[0].mnt);
@@ -332,7 +334,7 @@ static int nomount_setup_direct_inject(struct nomount_sb_info *sbi, struct nomou
 	return 0;
 }
 
-static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mount_opts *opts)
+static int mirage_setup_branches(struct mirage_sb_info *sbi, struct mirage_mount_opts *opts)
 {
 	char *branch_ptr;
 	char *branch_str;
@@ -351,13 +353,13 @@ static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mo
 		/*
 		 * Clone a private vfsmount for each layer path.
 		 * This detaches our reference from the public mount namespace,
-		 * so if nomountfs is mounted over the same path as one of its
+		 * so if mirage is mounted over the same path as one of its
 		 * layers, dentry_open and iterate_dir on that layer always
 		 * reach the real underlying fs — never loop back into us.
 		 */
 		sbi->lower_paths[sbi->num_lower_paths].dentry = dget(raw.dentry);
 		sbi->lower_paths[sbi->num_lower_paths].mnt =
-			nomount_clone_private_mount(&raw);
+			mirage_clone_private_mount(&raw);
 		if (IS_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt)) {
 			err = PTR_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt);
 			sbi->lower_paths[sbi->num_lower_paths].mnt = NULL;
@@ -388,7 +390,7 @@ static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mo
 			}
 			sbi->lower_paths[sbi->num_lower_paths].dentry = dget(raw.dentry);
 			sbi->lower_paths[sbi->num_lower_paths].mnt =
-				nomount_clone_private_mount(&raw);
+				mirage_clone_private_mount(&raw);
 			if (IS_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt)) {
 				err = PTR_ERR(sbi->lower_paths[sbi->num_lower_paths].mnt);
 				sbi->lower_paths[sbi->num_lower_paths].mnt = NULL;
@@ -410,13 +412,13 @@ static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mo
 	/*
 	 * Guard: reject if any lowerdir is the exact same directory as
 	 * upperdir (same inode, same superblock). This would cause
-	 * nomount_lookup to see identical entries in both layers and
+	 * mirage_vfs_lookup to see identical entries in both layers and
 	 * produce confusing duplicate results.
 	 *
 	 * The more dangerous case — lowerdir being the same path as the
 	 * VFS mount point — cannot be detected here because fill_super
 	 * runs before the mount is installed. That case is handled safely
-	 * in nomount_lookup via follow_down(), which traverses past any
+	 * in mirage_vfs_lookup via follow_down(), which traverses past any
 	 * mount point sitting on a lower dentry, ensuring we always reach
 	 * the real underlying filesystem rather than looping back into
 	 * ourselves.
@@ -439,7 +441,7 @@ static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mo
 			return err;
 		}
 		sbi->inject_path.dentry = dget(raw.dentry);
-		sbi->inject_path.mnt = nomount_clone_private_mount(&raw);
+		sbi->inject_path.mnt = mirage_clone_private_mount(&raw);
 		if (IS_ERR(sbi->inject_path.mnt)) {
 			err = PTR_ERR(sbi->inject_path.mnt);
 			sbi->inject_path.mnt = NULL;
@@ -465,7 +467,7 @@ static int nomount_setup_branches(struct nomount_sb_info *sbi, struct nomount_mo
  * correctly for system_file labels. Using the module dir's sb here would
  * pass the wrong sb type to security_sb_clone_mnt_opts and could BUG().
  */
-static int nomount_setup_superblock(struct super_block *sb, struct nomount_sb_info *sbi)
+static int mirage_setup_superblock(struct super_block *sb, struct mirage_sb_info *sbi)
 {
 	struct super_block *lsb;
 	struct inode *root_inode;
@@ -490,7 +492,7 @@ static int nomount_setup_superblock(struct super_block *sb, struct nomount_sb_in
 	 * magic the kernel finds no matching genfscon entry for "nomountfs"
 	 * and falls back to unlabeled — defeating any sepolicy rules.
 	 */
-	sb->s_magic = NOMOUNT_FS_MAGIC;
+	sb->s_magic = MIRAGE_FS_MAGIC;
 
 	sb->s_maxbytes = sbi->lower_sb->s_maxbytes;
 	
@@ -509,7 +511,7 @@ static int nomount_setup_superblock(struct super_block *sb, struct nomount_sb_in
 		return -EINVAL;
 	}
 
-	root_inode = nomount_iget(sb, d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry));
+	root_inode = mirage_iget(sb, d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry));
 	if (IS_ERR(root_inode)) {
 		return PTR_ERR(root_inode);
 	}
@@ -532,10 +534,10 @@ static int nomount_setup_superblock(struct super_block *sb, struct nomount_sb_in
 		iput(root_inode);
 		return err;
 	}
-	nomount_set_lower_paths(root, sbi->lower_paths, sbi->num_lower_paths);
+	set_lower_paths(root, sbi->lower_paths, sbi->num_lower_paths);
 
 	/* Step B: The inode is instantiated to the dentry.
-	 * SELinux wakes up here, it will call our nomount_getxattr, and 
+	 * SELinux wakes up here, it will call our mirage_vfs_getxattr, and 
 	 * since the route is already set, you will get the correct label.
 	 */
 	d_instantiate(root, root_inode);
@@ -546,7 +548,7 @@ static int nomount_setup_superblock(struct super_block *sb, struct nomount_sb_in
 	return 0;
 }
 
-static void nomount_setup_selinux(struct super_block *sb, struct nomount_sb_info *sbi)
+static void mirage_setup_selinux(struct super_block *sb, struct mirage_sb_info *sbi)
 {
 	struct inode *root_inode = d_inode(sb->s_root);
 	struct inode *root_lower = d_inode(sbi->lower_paths[sbi->num_lower_paths - 1].dentry);
@@ -577,30 +579,30 @@ static void nomount_setup_selinux(struct super_block *sb, struct nomount_sb_info
 	}
 }
 
-int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
+int mirage_fill_super(struct super_block *sb, void *raw_data, int silent)
 {
-	struct nomount_sb_info *sbi;
-	struct nomount_mount_opts opts;
+	struct mirage_sb_info *sbi;
+	struct mirage_mount_opts opts;
 	int err = 0;
 	int i;
 
 	/* 1. Unpack mount_data */
-	err = nomount_parse_options(sb, &opts, raw_data);
+	err = mirage_parse_options(sb, &opts, raw_data);
 	if (err) {
 		return err;
 	}
 
-	sbi = kzalloc(sizeof(struct nomount_sb_info), GFP_KERNEL);
+	sbi = kzalloc(sizeof(struct mirage_sb_info), GFP_KERNEL);
 	if (!sbi) return -ENOMEM;
 	sb->s_fs_info = sbi;
 
 	if (opts.target_str && *opts.target_str) {
-		err = nomount_setup_direct_inject(sbi, &opts);
+		err = mirage_setup_direct_inject(sbi, &opts);
 		if (err) {
 			goto out_free_sbi;
 		}
 	} else {
-		err = nomount_setup_branches(sbi, &opts);
+		err = mirage_setup_branches(sbi, &opts);
 		if (err) {
 			goto out_put_path;
 		}
@@ -619,16 +621,16 @@ int nomount_fill_super(struct super_block *sb, void *raw_data, int silent)
 		goto out_put_inject;
 	}
 
-	err = nomount_setup_superblock(sb, sbi);
+	err = mirage_setup_superblock(sb, sbi);
 	if (err) {
 		goto out_put_inject;
 	}
 
-	nomount_setup_selinux(sb, sbi);
+	mirage_setup_selinux(sb, sbi);
 
 	sbi->fake_type = kzalloc(sizeof(struct file_system_type), GFP_KERNEL);
 	if (sbi->fake_type) {
-		*sbi->fake_type = nomount_fs_type;
+		*sbi->fake_type = mirage_fs_type;
 		sbi->fake_type->name = sbi->lower_sb->s_type->name;
 		sb->s_type = sbi->fake_type;
 	}
@@ -656,26 +658,27 @@ out_free_sbi:
 
 static void init_once(void *obj)
 {
-	struct nomount_inode_info *i = obj;
+	struct mirage_inode_info *i = obj;
 	inode_init_once(&i->vfs_inode);
 }
 
-int nomount_init_inode_cache(void)
+int mirage_init_inode_cache(void)
 {
 	/* SLAB_HWCACHE_ALIGN: Aligns objects to the CPU's L1/L2 cache lines.
 	 * SLAB_MEM_SPREAD: Avoid concentrating memory on a single node.
 	 * This makes bulk inode allocations more fast.
 	 */
-	nomount_inode_cachep = kmem_cache_create("nomount_inode_cache",
-				sizeof(struct nomount_inode_info), 0,
-				SLAB_RECLAIM_ACCOUNT | SLAB_HWCACHE_ALIGN | SLAB_MEM_SPREAD, init_once);
-	return nomount_inode_cachep ? 0 : -ENOMEM;
+	mirage_inode_cachep = kmem_cache_create("mirage_inode_cache",
+				                             sizeof(struct mirage_inode_info), 0,
+				                             SLAB_RECLAIM_ACCOUNT | SLAB_HWCACHE_ALIGN | SLAB_MEM_SPREAD,
+											 init_once);
+	return mirage_inode_cachep ? 0 : -ENOMEM;
 }
 
-void nomount_destroy_inode_cache(void)
+void mirage_destroy_inode_cache(void)
 {
-	if (nomount_inode_cachep)
-		kmem_cache_destroy(nomount_inode_cachep);
+	if (mirage_inode_cachep)
+		kmem_cache_destroy(mirage_inode_cachep);
 }
 
 /* --- NFS / Export Operations ---
@@ -683,10 +686,10 @@ void nomount_destroy_inode_cache(void)
  * making it compatible with NFS and advanced tracing tools.
  */
 
-static struct inode *nomount_nfs_get_inode(struct super_block *sb, u64 ino,
+static struct inode *mirage_nfs_get_inode(struct super_block *sb, u64 ino,
 					  u32 generation)
 {
-	struct super_block *lower_sb = NOMOUNT_SB(sb)->lower_sb;
+	struct super_block *lower_sb = mirage_sb(sb)->lower_sb;
 	struct inode *lower_inode;
 
 	/* Find the inode in the lower filesystem */
@@ -695,28 +698,28 @@ static struct inode *nomount_nfs_get_inode(struct super_block *sb, u64 ino,
 		return ERR_PTR(-ESTALE);
 
 	/* Wrap it into a NoMountFS inode */
-	return nomount_iget(sb, lower_inode);
+	return mirage_iget(sb, lower_inode);
 }
 
-static struct dentry *nomount_fh_to_dentry(struct super_block *sb,
+static struct dentry *mirage_fh_to_dentry(struct super_block *sb,
 					  struct fid *fid, int fh_len,
 					  int fh_type)
 {
 	/* Forward the handle-to-dentry conversion using our nfs_get_inode */
 	return generic_fh_to_dentry(sb, fid, fh_len, fh_type,
-				    nomount_nfs_get_inode);
+				    mirage_nfs_get_inode);
 }
 
-static struct dentry *nomount_fh_to_parent(struct super_block *sb,
+static struct dentry *mirage_fh_to_parent(struct super_block *sb,
 					  struct fid *fid, int fh_len,
 					  int fh_type)
 {
 	/* Forward the handle-to-parent conversion */
 	return generic_fh_to_parent(sb, fid, fh_len, fh_type,
-				    nomount_nfs_get_inode);
+				    mirage_nfs_get_inode);
 }
 
-const struct export_operations nomount_export_ops = {
-	.fh_to_dentry	   = nomount_fh_to_dentry,
-	.fh_to_parent	   = nomount_fh_to_parent,
+const struct export_operations mirage_export_ops = {
+	.fh_to_dentry	   = mirage_fh_to_dentry,
+	.fh_to_parent	   = mirage_fh_to_parent,
 };

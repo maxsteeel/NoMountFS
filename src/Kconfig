@@ -1,14 +1,14 @@
-config NOMOUNT_FS
-	tristate "NoMountFS filesystem support"
+config MIRAGE
+	tristate "Mirage virtal filesystem support"
 	help
 	  A stackable filesystem for Android content redirection.
 
-config NOMOUNT_FS_KERNEL_UMOUNT
-	bool "NoMountFS kernel-level umount support"
-	depends on NOMOUNT_FS
-	default y
+config MIRAGE_KERNEL_UMOUNT
+	bool "Mirage kernel-level umount support"
+	depends on MIRAGE
+	default n
 	help
-	  Enable kernel-level automatic umount support for NoMountFS.
+	  Enable kernel-level automatic umount support for Mirage.
 	  This allows NoMountFS to automatically unmount paths for app
 	  processes without depending on KernelSU or other external
 	  modules.
@@ -16,30 +16,30 @@ config NOMOUNT_FS_KERNEL_UMOUNT
 	  This feature hooks into the kernel's setuid/setresuid syscalls
 	  to trigger umount operations when zygote forks app processes.
 
-config NOMOUNT_FS_PROC
+config MIRAGE_PROCFS
 	bool "NoMountFS procfs interface for umount management"
-	depends on NOMOUNT_FS_KERNEL_UMOUNT
+	depends on MIRAGE_KERNEL_UMOUNT
 	default y
 	help
-	  Enable procfs interface (/proc/nomountfs/) for managing the
+	  Enable procfs interface (/proc/mirage/) for managing the
 	  kernel umount list from userspace.
 
 	  This creates the following proc entries:
-	  - /proc/nomountfs/umount_list   - List all umount paths
-	  - /proc/nomountfs/umount_add    - Add a path to umount list
-	  - /proc/nomountfs/umount_del    - Remove a path from umount list
-	  - /proc/nomountfs/umount_clear  - Clear all umount paths
-	  - /proc/nomountfs/umount_enabled - Enable/disable umount
+	  - /proc/mirage/umount_list   - List all umount paths
+	  - /proc/mirage/umount_add    - Add a path to umount list
+	  - /proc/mirage/umount_del    - Remove a path from umount list
+	  - /proc/mirage/umount_clear  - Clear all umount paths
+	  - /proc/mirage/umount_enabled - Enable/disable umount
 
 	  If disabled, you can still manage the umount list via kernel
 	  hooks or module parameters, but not from userspace at runtime.
 
-config NOMOUNT_RCU_PATH_ACCESS
-	bool "NoMountFS RCU-safe dentry access"
-	depends on NOMOUNT_FS
+config MIRAGE_RCU_PATH_ACCESS
+	bool "Mirage RCU-safe dentry access"
+	depends on MIRAGE
 	default y
 	help
-	  Enable RCU-safe lockless path walking for NoMountFS.
+	  Enable RCU-safe lockless path walking for Mirage.
 	  This dramatically improves performance during concurrent
 	  directory lookups by avoiding spinlocks.
 

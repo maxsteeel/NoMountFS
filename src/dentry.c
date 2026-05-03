@@ -1,18 +1,18 @@
 /*
- * NoMountFS: Dentry operations
+ * Mirage: Dentry operations
  * Managing path name cache and RCU-walk safety.
  */
 
-#include "nomount.h"
+#include "mirage.h"
 #include "compat.h"
 
-/* nomount_d_revalidate: checks if our cached dentry is still valid 
+/* mirage_vfs_d_revalidate: checks if our cached dentry is still valid 
  * compared to the real one on disk.
  */
-static int nomount_d_revalidate(struct dentry *dentry, unsigned int flags)
+static int mirage_vfs_d_revalidate(struct dentry *dentry, unsigned int flags)
 {
 	struct dentry *lower_dentry;
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 	int valid = 1;
 
 	/* * RCU-safe extraction without redundant locks. The VFS guarantees
@@ -46,19 +46,19 @@ static int nomount_d_revalidate(struct dentry *dentry, unsigned int flags)
 	return valid;
 }
 
-/* nomount_d_release: cleanup when a dentry is destroyed.
+/* mirage_vfs_d_release: cleanup when a dentry is destroyed.
  */
-static void nomount_d_release(struct dentry *dentry)
+static void mirage_vfs_d_release(struct dentry *dentry)
 {
 	/* Free the private data and release the lower path reference */
 	free_dentry_private_data(dentry);
 }
 
-static struct dentry *nomount_d_real(struct dentry *dentry,
-				     const struct inode *inode)
+static struct dentry *mirage_vfs_d_real(struct dentry *dentry,
+					const struct inode *inode)
 {
 	struct dentry *lower_dentry;
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 
 	if (likely(inode && d_inode(dentry) == inode))
 		return dentry;
@@ -75,11 +75,11 @@ static struct dentry *nomount_d_real(struct dentry *dentry,
 	return lower_dentry;
 }
 
-/* nomount_d_delete: Decides if a dentry should be cached when its refcount hits 0.
+/* mirage_vfs_d_delete: Decides if a dentry should be cached when its refcount hits 0.
  */
-static int nomount_d_delete(const struct dentry *dentry)
+static int mirage_vfs_d_delete(const struct dentry *dentry)
 {
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 	struct dentry *lower_dentry;
 	int err = 0;
 
@@ -112,19 +112,19 @@ static int nomount_d_delete(const struct dentry *dentry)
 }
 
 /* Dentry operations vector */
-const struct dentry_operations nomount_dops = {
-	.d_revalidate	= nomount_d_revalidate,
-	.d_release		= nomount_d_release,
-	.d_real			= nomount_d_real,
-	.d_delete	    = nomount_d_delete, 
+const struct dentry_operations mirage_dops = {
+	.d_revalidate	= mirage_vfs_d_revalidate,
+	.d_release		= mirage_vfs_d_release,
+	.d_real			= mirage_vfs_d_real,
+	.d_delete	    = mirage_vfs_d_delete, 
 };
 
 /* Helper to allocate private dentry data */
 int new_dentry_private_data(struct dentry *dentry)
 {
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 
-	info = kmem_cache_zalloc(nomount_dentry_cachep, GFP_KERNEL);
+	info = kmem_cache_zalloc(mirage_dentry_cachep, GFP_KERNEL);
 	if (!info)
 		return -ENOMEM;
 
@@ -138,17 +138,17 @@ int new_dentry_private_data(struct dentry *dentry)
 	return 0;
 }
 
-#ifdef NOMOUNT_RCU_PATH_ACCESS
-static void nomount_dentry_rcu_free(struct rcu_head *head)
+#ifdef MIRAGE_RCU_PATH_ACCESS
+static void mirage_dentry_rcu_free(struct rcu_head *head)
 {
-	struct nomount_dentry_info *info = container_of(head, struct nomount_dentry_info, rcu);
-	kmem_cache_free(nomount_dentry_cachep, info);
+	struct mirage_dentry_info *info = container_of(head, struct mirage_dentry_info, rcu);
+	kmem_cache_free(mirage_dentry_cachep, info);
 }
 #endif
 
 void free_dentry_private_data(struct dentry *dentry)
 {
-    struct nomount_dentry_info *info = NOMOUNT_D(dentry);
+    struct mirage_dentry_info *info = mirage_dentry(dentry);
 	int i;
 
     if (likely(info)) {
@@ -166,15 +166,15 @@ void free_dentry_private_data(struct dentry *dentry)
 		rcu_assign_pointer(dentry->d_fsdata, NULL);
 		spin_unlock(&dentry->d_lock);
 
-#ifdef NOMOUNT_RCU_PATH_ACCESS
+#ifdef MIRAGE_RCU_PATH_ACCESS
 		/*
 		 * Use kfree_rcu() to defer freeing until all RCU readers complete.
 		 * The grace period ensures readers who already fetched the pointer
 		 * can finish before the memory is freed.
 		 */
-		call_rcu(&info->rcu, nomount_dentry_rcu_free);
+		call_rcu(&info->rcu, mirage_dentry_rcu_free);
 #else
-		kmem_cache_free(nomount_dentry_cachep, info);
+		kmem_cache_free(mirage_dentry_cachep, info);
 #endif
     }
 }

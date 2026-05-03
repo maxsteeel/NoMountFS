@@ -1,26 +1,26 @@
 /*
- * NoMountFS: Kernel-level umount support.
+ * Mirage: Kernel-level umount support.
  *
- * This file provides the kernel umount functionality for NoMountFS,
+ * This file provides the kernel umount functionality for Mirage,
  * allowing automatic unmounting of paths for app processes without
  * depending on KernelSU.
  */
 
-#ifndef __NOMOUNT_UMOUNT_H__
-#define __NOMOUNT_UMOUNT_H__
+#ifndef __MIRAGE_UMOUNT_H__
+#define __MIRAGE_UMOUNT_H__
 
 #include <linux/types.h>
 #include <linux/list.h>
 #include <linux/rwsem.h>
 
 /* Umount mode constants */
-#define NOMOUNT_UMOUNT_WIPE     0
-#define NOMOUNT_UMOUNT_ADD      1
-#define NOMOUNT_UMOUNT_DEL      2
+#define MIRAGE_UMOUNT_WIPE     0
+#define MIRAGE_UMOUNT_ADD      1
+#define MIRAGE_UMOUNT_DEL      2
 
 /* Umount flags */
-#define NOMOUNT_UMOUNT_FLAG_NONE        0x0
-#define NOMOUNT_UMOUNT_FLAG_MNT_ONLY    0x1
+#define MIRAGE_UMOUNT_FLAG_NONE        0x0
+#define MIRAGE_UMOUNT_FLAG_MNT_ONLY    0x1
 
 /* Mount entry structure for umount list */
 struct mount_entry {
@@ -30,11 +30,11 @@ struct mount_entry {
 };
 
 /* Global umount list and lock */
-extern struct list_head nomount_mount_list;
-extern struct rw_semaphore nomount_mount_list_lock;
+extern struct list_head mirage_mount_list;
+extern struct rw_semaphore mirage_mount_list_lock;
 
 /* Feature control */
-extern bool nomount_kernel_umount_enabled;
+extern bool mirage_kernel_umount_enabled;
 
 /* UID range constants */
 #define PER_USER_RANGE 100000
@@ -59,28 +59,28 @@ static inline bool is_isolated_process(uid_t uid)
 }
 
 /* Initialization and cleanup */
-void nomount_kernel_umount_init(void);
-void nomount_kernel_umount_exit(void);
+void mirage_kernel_umount_init(void);
+void mirage_kernel_umount_exit(void);
 
 /* Main umount handler - called from setuid/setresuid hooks */
-void nmfs_handle_umount(uid_t old_uid, uid_t new_uid);
-void nmfs_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
+void mirage_handle_umount(uid_t old_uid, uid_t new_uid);
+void mirage_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
 
 /* Procfs interface functions */
-#ifdef NOMOUNT_FS_PROC
-int nomount_umount_proc_init(void);
-void nomount_umount_proc_exit(void);
+#ifdef MIRAGE_FS_PROC
+int mirage_umount_proc_init(void);
+void mirage_umount_proc_exit(void);
 #else
-static inline int nomount_umount_proc_init(void) { return 0; }
-static inline void nomount_umount_proc_exit(void) { }
+static inline int mirage_umount_proc_init(void) { return 0; }
+static inline void mirage_umount_proc_exit(void) { }
 #endif
 
 /* List management functions */
-int nomount_umount_add(const char *path, unsigned int flags);
-int nomount_umount_del(const char *path);
-int nomount_umount_wipe(void);
+int mirage_umount_add(const char *path, unsigned int flags);
+int mirage_umount_del(const char *path);
+int mirage_umount_wipe(void);
 
 /* Helper to check if uid should trigger umount */
-bool nomount_uid_should_umount(uid_t uid);
+bool mirage_uid_should_umount(uid_t uid);
 
-#endif /* __NOMOUNT_UMOUNT_H__ */
+#endif /* __MIRAGE_UMOUNT_H__ */

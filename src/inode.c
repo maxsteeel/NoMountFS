@@ -1,20 +1,20 @@
 /*
- * NoMountFS: Inode operations
+ * Mirage: Inode operations
  * Full R/W support with xattr (SELinux), rename, symlink and legacy compatibility.
  */
 
-#include "nomount.h"
+#include "mirage.h"
 #include "compat.h"
 #include <linux/xattr.h>
 
-static int nomount_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool want_excl)
+static int mirage_vfs_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool want_excl)
 {
 	int err;
 	struct dentry *alias;
 	struct dentry *lower_parent_dentry = NULL;
-	struct nomount_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
+	struct mirage_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
 
-        /* VFS holds parent i_mutex, so for that extract raw path is secure on this context. */
+    /* VFS holds parent i_mutex, so for that extract raw path is secure on this context. */
 	struct path lower_path = info->lower_paths[0]; 
 	struct dentry *lower_dentry = lower_path.dentry;
 
@@ -24,7 +24,7 @@ static int nomount_create(struct inode *dir, struct dentry *dentry, umode_t mode
 	if (err) goto out;
 
 	/* Interpose the new dentry - check for errors properly */
-	alias = __nomount_interpose(dentry, dir->i_sb, &lower_path);
+	alias = __mirage_interpose(dentry, dir->i_sb, &lower_path);
 	if (IS_ERR(alias)) {
 		err = PTR_ERR(alias);
 		goto out;
@@ -35,7 +35,7 @@ static int nomount_create(struct inode *dir, struct dentry *dentry, umode_t mode
 	}
 	err = 0;
 
-	fsstack_copy_attr_times(dir, nomount_lower_inode(dir));
+	fsstack_copy_attr_times(dir, mirage_lower_inode(dir));
 	fsstack_copy_inode_size(dir, d_inode(lower_parent_dentry));
 
 out:
@@ -43,10 +43,10 @@ out:
 	return err;
 }
 
-static int nomount_unlink(struct inode *dir, struct dentry *dentry)
+static int mirage_vfs_unlink(struct inode *dir, struct dentry *dentry)
 {
 	int err;
-	struct inode *lower_dir_inode = nomount_lower_inode(dir);
+	struct inode *lower_dir_inode = mirage_lower_inode(dir);
 	struct dentry *lower_dir_dentry;
 	struct nomount_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
 
@@ -58,7 +58,7 @@ static int nomount_unlink(struct inode *dir, struct dentry *dentry)
 	if (err) goto out;
 
 	if (d_inode(dentry)) {
-		set_nlink(d_inode(dentry), nomount_lower_inode(d_inode(dentry))->i_nlink);
+		set_nlink(d_inode(dentry), mirage_lower_inode(d_inode(dentry))->i_nlink);
 		/* Sync deleted file ctime for apps holding open file descriptors */
 		fsstack_copy_attr_times(d_inode(dentry), nomount_lower_inode(d_inode(dentry)));
 	}
@@ -68,12 +68,12 @@ out:
 	return err;
 }
 
-static int nomount_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
+static int mirage_vfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 {
 	int err;
 	struct dentry *alias;
 	struct dentry *lower_parent_dentry;
-	struct nomount_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
+	struct mirage_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
 	
 	struct path lower_path = info->lower_paths[0];
 	struct dentry *lower_dentry = lower_path.dentry;
@@ -83,7 +83,7 @@ static int nomount_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 	err = vfs_mkdir(d_inode(lower_parent_dentry), lower_dentry, mode);
 	if (err) goto out;
 
-	alias = __nomount_interpose(dentry, dir->i_sb, &lower_path);
+	alias = __mirage_interpose(dentry, dir->i_sb, &lower_path);
 	if (IS_ERR(alias)) {
 		err = PTR_ERR(alias);
 		goto out;
@@ -101,11 +101,11 @@ out:
 	return err;
 }
 
-static int nomount_rmdir(struct inode *dir, struct dentry *dentry)
+static int mirage_vfs_rmdir(struct inode *dir, struct dentry *dentry)
 {
 	int err;
 	struct dentry *lower_dir_dentry;
-	struct nomount_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
+	struct mirage_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
 	
 	struct dentry *lower_dentry = info->lower_paths[0].dentry;
 
@@ -130,12 +130,12 @@ out:
 	return err;
 }
 
-static int nomount_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
+static int mirage_vfs_symlink(struct inode *dir, struct dentry *dentry, const char *symname)
 {
 	int err;
 	struct dentry *alias;
 	struct dentry *lower_parent_dentry;
-	struct nomount_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
+	struct mirage_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
 	
 	struct path lower_path = info->lower_paths[0];
 	struct dentry *lower_dentry = lower_path.dentry;
@@ -145,7 +145,7 @@ static int nomount_symlink(struct inode *dir, struct dentry *dentry, const char 
 	err = vfs_symlink(d_inode(lower_parent_dentry), lower_dentry, symname);
 	if (err) goto out;
 
-	alias = __nomount_interpose(dentry, dir->i_sb, &lower_path);
+	alias = __mirage_interpose(dentry, dir->i_sb, &lower_path);
 	if (IS_ERR(alias)) {
 		err = PTR_ERR(alias);
 		goto out;
@@ -163,11 +163,11 @@ out:
 }
 
 #ifdef RENAME_HAS_FLAGS
-static int nomount_rename(struct inode *old_dir, struct dentry *old_dentry,
+static int mirage_vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 			  struct inode *new_dir, struct dentry *new_dentry,
 			  unsigned int flags)
 #else
-static int nomount_rename(struct inode *old_dir, struct dentry *old_dentry,
+static int mirage_vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 			  struct inode *new_dir, struct dentry *new_dentry)
 #endif
 {
@@ -175,8 +175,8 @@ static int nomount_rename(struct inode *old_dir, struct dentry *old_dentry,
 	struct dentry *lower_old_dir_dentry, *lower_new_dir_dentry;
 	struct dentry *trap;
 
-	struct nomount_dentry_info *old_info = rcu_dereference_raw(old_dentry->d_fsdata);
-	struct nomount_dentry_info *new_info = rcu_dereference_raw(new_dentry->d_fsdata);
+	struct mirage_dentry_info *old_info = rcu_dereference_raw(old_dentry->d_fsdata);
+	struct mirage_dentry_info *new_info = rcu_dereference_raw(new_dentry->d_fsdata);
 
 	struct dentry *lower_old_dentry = old_info->lower_paths[0].dentry;
 	struct dentry *lower_new_dentry = new_info->lower_paths[0].dentry;
@@ -231,10 +231,10 @@ out:
 	return err;
 }
 
-static int nomount_getattr(const struct path *path, struct kstat *stat,
+static int mirage_vfs_getattr(const struct path *path, struct kstat *stat,
 			   u32 request_mask, unsigned int query_flags)
 {
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 	struct path lower_path;
 	int err = -ENOENT;
 
@@ -264,12 +264,12 @@ static int nomount_getattr(const struct path *path, struct kstat *stat,
 	return err;
 }
 
-static int nomount_setattr(struct dentry *dentry, struct iattr *ia)
+static int mirage_vfs_setattr(struct dentry *dentry, struct iattr *ia)
 {
 	int err;
 	struct inode *inode = d_inode(dentry);
-	struct inode *lower_inode = nomount_lower_inode(inode);
-	struct nomount_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
+	struct inode *lower_inode = mirage_lower_inode(inode);
+	struct mirage_dentry_info *info = rcu_dereference_raw(dentry->d_fsdata);
 	struct dentry *lower_dentry = info->lower_paths[0].dentry;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 12, 0)
@@ -304,10 +304,10 @@ out:
 
 /* --- XATTR Handling --- */
 
-static ssize_t nomount_getxattr(struct dentry *dentry, struct inode *inode,
+static ssize_t mirage_vfs_getxattr(struct dentry *dentry, struct inode *inode,
 				const char *name, void *buffer, size_t size)
 {
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 	struct dentry *ld;
 	ssize_t err = -EOPNOTSUPP;
 
@@ -328,10 +328,10 @@ static ssize_t nomount_getxattr(struct dentry *dentry, struct inode *inode,
 	return err;
 }
 
-static int nomount_setxattr(struct dentry *dentry, struct inode *inode, const char *name,
+static int mirage_vfs_setxattr(struct dentry *dentry, struct inode *inode, const char *name,
 			    const void *value, size_t size, int flags)
 {
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 	struct dentry *ld;
 	int err = -EOPNOTSUPP;
 
@@ -350,9 +350,9 @@ static int nomount_setxattr(struct dentry *dentry, struct inode *inode, const ch
 	return err;
 }
 
-static int nomount_removexattr(struct dentry *dentry, struct inode *inode, const char *name)
+static int mirage_vfs_removexattr(struct dentry *dentry, struct inode *inode, const char *name)
 {
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 	struct dentry *ld;
 	int err = -EOPNOTSUPP;
 
@@ -371,9 +371,9 @@ static int nomount_removexattr(struct dentry *dentry, struct inode *inode, const
 	return err;
 }
 
-static ssize_t nomount_listxattr(struct dentry *dentry, char *buffer, size_t buffer_size)
+static ssize_t mirage_vfs_listxattr(struct dentry *dentry, char *buffer, size_t buffer_size)
 {
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 	struct dentry *ld;
 	ssize_t err = -EOPNOTSUPP;
 
@@ -393,56 +393,56 @@ static ssize_t nomount_listxattr(struct dentry *dentry, char *buffer, size_t buf
 }
 
 /* --- Handlers XATTRs --- */
-static int nomount_xattr_get(const struct xattr_handler *handler,
+static int mirage_xattr_get(const struct xattr_handler *handler,
 			    struct dentry *dentry, struct inode *inode,
 			    const char *name, void *buffer, size_t size, int flags)
 {
-	return nomount_getxattr(dentry, inode, name, buffer, size);
+	return mirage_vfs_getxattr(dentry, inode, name, buffer, size);
 }
 
-static int nomount_xattr_set(const struct xattr_handler *handler,
+static int mirage_xattr_set(const struct xattr_handler *handler,
 			    struct dentry *dentry, struct inode *inode,
 			    const char *name, const void *value, size_t size,
 			    int flags)
 {
 	if (value)
-		return nomount_setxattr(dentry, inode, name, value, size, flags);
+		return mirage_vfs_setxattr(dentry, inode, name, value, size, flags);
 
 	BUG_ON(flags != XATTR_REPLACE);
-	return nomount_removexattr(dentry, inode, name);
+	return mirage_vfs_removexattr(dentry, inode, name);
 }
 
-const struct xattr_handler nomount_xattr_handler = {
+const struct xattr_handler mirage_xattr_handler = {
 	.prefix = "",		/* Match any attribute string */
-	.get = nomount_xattr_get,
-	.set = nomount_xattr_set,
+	.get = mirage_xattr_get,
+	.set = mirage_xattr_set,
 };
 
-const struct xattr_handler *nomount_xattr_handlers[] = {
-	&nomount_xattr_handler,
+const struct xattr_handler *mirage_xattr_handlers[] = {
+	&mirage_xattr_handler,
 	NULL
 };
 
 /* --- Symlink Management --- */
 
 #ifdef LEGACY_FOLLOW_LINK
-static void *nomount_follow_link(struct dentry *dentry, struct nameidata *nd)
+static void *mirage_vfs_follow_link(struct dentry *dentry, struct nameidata *nd)
 {
-	struct inode *lower_inode = nomount_lower_inode(d_inode(dentry));
+	struct inode *lower_inode = mirage_lower_inode(d_inode(dentry));
 	if (lower_inode->i_op->follow_link)
 		return lower_inode->i_op->follow_link(dentry, nd);
 	return ERR_PTR(-EINVAL);
 }
 #else
-static const char *nomount_get_link(struct dentry *dentry,
+static const char *mirage_vfs_get_link(struct dentry *dentry,
 				   struct inode *inode,
 				   struct delayed_call *done)
 {
-	struct nomount_dentry_info *info;
+	struct mirage_dentry_info *info;
 
 	/* RCU-walk mode (dentry is NULL) - Delegate directly to lower inode */
 	if (unlikely(!dentry)) {
-		struct inode *lower_inode = nomount_lower_inode(inode);
+		struct inode *lower_inode = mirage_lower_inode(inode);
 		if (!lower_inode->i_op->get_link)
 			return ERR_PTR(-ECHILD);
 		return lower_inode->i_op->get_link(NULL, lower_inode, done);
@@ -457,47 +457,47 @@ static const char *nomount_get_link(struct dentry *dentry,
 }
 #endif
 
-static int nomount_permission(struct inode *inode, int mask)
+static int mirage_permission(struct inode *inode, int mask)
 {
 	/* * inode_permission() natively handles MAY_NOT_BLOCK (RCU mode) correctly
 	 * AND invokes the SELinux MAC hooks (security_inode_permission).
 	 * Calling generic_permission() manually bypasses SELinux and breaks
 	 * compilation on 5.12+ kernels.
 	 */
-	return inode_permission(nomount_lower_inode(inode), mask);
+	return inode_permission(mirage_lower_inode(inode), mask);
 }
 
 /* --- Operation Vectors --- */
 
-const struct inode_operations nomount_dir_iops = {
-	.getattr        = nomount_getattr,
-	.create		= nomount_create,
-	.lookup		= nomount_lookup,
-	.unlink		= nomount_unlink,
-	.mkdir		= nomount_mkdir,
-	.rmdir		= nomount_rmdir,
-	.symlink        = nomount_symlink,
-	.rename		= nomount_rename,
-	.permission	= nomount_permission,
-	.setattr        	= nomount_setattr,
-	.listxattr	= nomount_listxattr,
+const struct inode_operations mirage_dir_iops = {
+	.getattr    = mirage_vfs_getattr,
+	.create		= mirage_vfs_create,
+	.lookup		= mirage_vfs_lookup,
+	.unlink		= mirage_vfs_unlink,
+	.mkdir		= mirage_vfs_mkdir,
+	.rmdir		= mirage_vfs_rmdir,
+	.symlink    = mirage_vfs_symlink,
+	.rename		= mirage_vfs_rename,
+	.permission	= mirage_vfs_permission,
+	.setattr    = mirage_vfs_setattr,
+	.listxattr	= mirage_vfs_listxattr,
 };
 
-const struct inode_operations nomount_main_iops = {
-	.getattr        = nomount_getattr,
-	.permission	= nomount_permission,
-	.setattr        	= nomount_setattr,
-	.listxattr	= nomount_listxattr,
+const struct inode_operations mirage_main_iops = {
+	.getattr    = mirage_vfs_getattr,
+	.permission	= mirage_vfs_permission,
+	.setattr    = mirage_vfs_setattr,
+	.listxattr	= mirage_vfs_listxattr,
 };
 
-const struct inode_operations nomount_symlink_iops = {
-	.getattr        = nomount_getattr,
+const struct inode_operations mirage_symlink_iops = {
+	.getattr     = mirage_vfs_getattr,
 #ifdef LEGACY_FOLLOW_LINK
-	.follow_link	= nomount_follow_link,
+	.follow_link = mirage_vfs_follow_link,
 #else
-	.get_link	= nomount_get_link,
+	.get_link	 = mirage_vfs_get_link,
 #endif
-	.permission	= nomount_permission,
-	.setattr        = nomount_setattr,
-	.listxattr	= nomount_listxattr,
+	.permission	 = mirage_vfs_permission,
+	.setattr     = mirage_vfs_setattr,
+	.listxattr	 = mirage_vfs_listxattr,
 };

@@ -1,10 +1,10 @@
 /*
- * NoMountFS: Compatibility layer for different Linux Kernel versions.
- * This ensures that NoMountFS can be compiled on Android kernels from 3.4 to 6.x.
+ * Mirage: Compatibility layer for different Linux Kernel versions.
+ * This ensures that Mirage can be compiled on Android kernels from 3.4 to 6.x.
  */
 
-#ifndef _NOMOUNT_COMPAT_H_
-#define _NOMOUNT_COMPAT_H_
+#ifndef _MIRAGE_COMPAT_H_
+#define _MIRAGE_COMPAT_H_
 
 #include <linux/version.h>
 #include <linux/fs.h>
@@ -87,7 +87,7 @@
 #endif
 
 /* Compatibility for i_version in Kernel 5.4+ */
-static inline void nomount_set_iversion(struct inode *inode, u64 val)
+static inline void mirage_set_iversion(struct inode *inode, u64 val)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
 	inode_set_iversion(inode, val);
@@ -96,7 +96,7 @@ static inline void nomount_set_iversion(struct inode *inode, u64 val)
 #endif
 }
 
-static inline void nomount_inc_iversion(struct inode *inode)
+static inline void mirage_inc_iversion(struct inode *inode)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
 	inode_inc_iversion(inode);
@@ -107,9 +107,9 @@ static inline void nomount_inc_iversion(struct inode *inode)
 
 /* Lookup flags: 'unsigned int' in new kernels, 'int' in old ones. */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0)
-    typedef unsigned int nomount_lookup_flags;
+    typedef unsigned int mirage_lookup_flags;
 #else
-    typedef int nomount_lookup_flags;
+    typedef int mirage_lookup_flags;
 #endif
 
 /*
@@ -128,12 +128,12 @@ static inline void nomount_inc_iversion(struct inode *inode)
 #endif
 
 /*
- * nomount_clone_private_mount: clone a vfsmount privately so it is
+ * mirage_clone_private_mount: clone a vfsmount privately so it is
  * detached from the mount namespace.
  *
  * A private clone is not visible to follow_mount/lookup_mnt in the
  * public namespace, so dentry_open through it always reaches the real
- * underlying filesystem directly — even when nomountfs is mounted over
+ * underlying filesystem directly — even when Mirage is mounted over
  * the same path as one of its lower layers.
  *
  * clone_private_mount() was added in 3.18 but is not always exported
@@ -141,23 +141,23 @@ static inline void nomount_inc_iversion(struct inode *inode)
  *
  * Returns ERR_PTR on error, never NULL.
  */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0) && !defined(NOMOUNT_NO_CLONE_PRIVATE_MOUNT)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 18, 0) && !defined(NO_CLONE_PRIVATE_MOUNT)
 
-static inline struct vfsmount *nomount_clone_private_mount(struct path *path)
+static inline struct vfsmount *mirage_clone_private_mount(struct path *path)
 {
 	struct vfsmount *mnt = clone_private_mount(path);
 	return mnt ? mnt : ERR_PTR(-ENOMEM);
 }
 
 #else
-static inline struct vfsmount *nomount_clone_private_mount(struct path *path)
+static inline struct vfsmount *mirage_clone_private_mount(struct path *path)
 {
 	struct vfsmount *mnt = mntget(path->mnt);
 	return mnt ? mnt : ERR_PTR(-ENOMEM);
 }
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0) && defined(NOMOUNT_FS_KERNEL_UMOUNT)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0) && defined(MIRAGE_KERNEL_UMOUNT)
 __weak int path_umount(struct path *path, int flags)
 {
 	char buf[256] = {0};
@@ -190,7 +190,7 @@ out:
 }
 #endif
 
-static inline u64 nomount_query_iversion(struct inode *inode)
+static inline u64 mirage_query_iversion(struct inode *inode)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0)
 	return inode_query_iversion(inode);
@@ -200,7 +200,7 @@ static inline u64 nomount_query_iversion(struct inode *inode)
 }
 
 /* Helper to get mtime from inode, handling both old and new kernels */
-static inline u64 nomount_get_mtime(struct inode *inode)
+static inline u64 mirage_get_mtime(struct inode *inode)
 {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
     struct timespec64 mtime = inode_get_mtime(inode);
@@ -210,4 +210,4 @@ static inline u64 nomount_get_mtime(struct inode *inode)
 #endif
 }
 
-#endif /* _NOMOUNT_COMPAT_H_ */
+#endif /* _MIRAGE_COMPAT_H_ */

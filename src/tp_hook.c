@@ -1,6 +1,6 @@
 /*
- * NoMountFS - Tracepoint hook for setresuid syscall interception.
- * This allows NoMountFS to automatically unmount paths for app processes
+ * Mirage - Tracepoint hook for setresuid syscall interception.
+ * This allows Mirage to automatically unmount paths for app processes
  * without depending on KernelSU, by hooking into the setresuid syscall
  * and triggering our umount logic when an app UID is set.
  */
@@ -9,8 +9,8 @@
 #include <trace/events/syscalls.h>
 #include <linux/tracepoint.h>
 #include <asm/unistd.h>
-#include "nomount.h"
-#include "nomount_umount.h"
+#include "mirage.h"
+#include "kernel_umount.h"
 
 /* Architecture-independent syscall argument extraction macros. */
 #if defined(CONFIG_ARM64)
@@ -30,11 +30,11 @@
     #define SYSCALL_ARG2(regs) ((regs)->cx)
     #define SYSCALL_ARG3(regs) ((regs)->dx)
 #else
-    #error "NoMountFS: Unsupported architecture for syscall interception."
+    #error "Mirage: Unsupported architecture for syscall interception."
 #endif
 
 /* 1. Define the function that will be collected from the tracepoint */
-static void nomount_sys_enter_probe(void *ignore, struct pt_regs *regs, long id)
+static void mirage_sys_enter_probe(void *ignore, struct pt_regs *regs, long id)
 {
     /* __NR_setresuid is dynamically resolved based on architecture by unistd.h */
     if (id == __NR_setresuid) {
@@ -43,27 +43,27 @@ static void nomount_sys_enter_probe(void *ignore, struct pt_regs *regs, long id)
         uid_t suid = (uid_t)SYSCALL_ARG3(regs);
 
         /* Call our secret magic */
-        nmfs_handle_setresuid(ruid, euid, suid);
+        mirage_handle_setresuid(ruid, euid, suid);
     }
 }
 
 /* 2. Register the hook at initialization (main.c) */
-int nomount_init_hooks(void)
+int mirage_init_tp_hooks(void)
 {
     int ret;
-    ret = register_trace_sys_enter(nomount_sys_enter_probe, NULL);
+    ret = register_trace_sys_enter(mirage_sys_enter_probe, NULL);
     if (ret) {
-        pr_err("nomount: Failed to register sys_enter tracepoint\n");
+        pr_err("mirage: Failed to register sys_enter tracepoint\n");
         return ret;
     }
-    pr_info("nomount: Hooked via Tracepoints!\n");
+    pr_info("mirage: Hooked via Tracepoints!\n");
     return 0;
 }
 
 /* 3. Unregister upon exit */
-void nomount_exit_hooks(void)
+void mirage_exit_tp_hooks(void)
 {
-    unregister_trace_sys_enter(nomount_sys_enter_probe, NULL);
+    unregister_trace_sys_enter(mirage_sys_enter_probe, NULL);
     
     /*
      * unregister_trace_sys_enter() only unlinks the probe. We MUST wait 
